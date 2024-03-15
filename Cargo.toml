@@ -1,0 +1,39 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+repository = "https://github.com/HalaOS/rasi-libp2p.git"
+version = "0.1.9"
+
+[workspace.dependencies]
+rasi = { path = "rasi/crates/rasi", version = "^0.1" }
+rasi-ext = { path = "rasi/crates/ext", version = "^0.1" }
+rasi-default = { path = "rasi/crates/default", version = "^0.1" }
+rasi-syscall = { path = "rasi/crates/syscall", version = "^0.1" }
+rasi-spec = { path = "rasi/crates/spec", version = "^0.1" }
+
+
+log = { version = "^0.4" }
+pretty_env_logger = "^0.5"
+
+
+# rasi deps
+futures = { version = "^0.3", default-features = false }
+bitmask-enum = "^2.2"
+boring = "^4.4.0"
+quiche = { version = "^0.20.0", features = ["boringssl-boring-crate"] }
+bytes = "^1.5"
+rand = { version = "^0.8", features = ["getrandom"] }
+cooked-waker = "^5"
+parking_lot = "^0.12"
+ring = "^0.17"
+dashmap = "5.5.3"
+divan = "^0.1"
+futures-test = "0.3.30"
+num_cpus = "^1.16"
+boxcar = "^0.2.4"
+mio = { version = "^0.8.9", features = ["os-poll", "net"] }
+thiserror = "1.0.57"
+windows-sys = "^0.52"
