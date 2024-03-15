@@ -18,10 +18,18 @@
 //! This means that the decision of what transport protocol to use is up to the developer,
 //! and an application can support many different transports at the same time.
 
-use std::{io, net::Shutdown, task::Waker};
+use std::{
+    io,
+    net::Shutdown,
+    task::{Poll, Waker},
+};
 
 use multiaddr::Multiaddr;
-use rasi::syscall::{CancelablePoll, Handle};
+use rasi::{
+    io::{AsyncRead, AsyncWrite},
+    syscall::{CancelablePoll, Handle},
+    utils::cancelable_would_block,
+};
 
 /// A trait that pepresents the characteristics of the libp2p transport concept.
 ///
@@ -64,10 +72,126 @@ pub trait Transport {
     /// Sends data on the stream to the remote address.
     ///
     /// On success, returns the number of bytes written.
-    fn write(&self, stream: &Handle, buf: &[u8]) -> CancelablePoll<io::Result<usize>>;
+    fn write(&self, waker: Waker, stream: &Handle, buf: &[u8])
+        -> CancelablePoll<io::Result<usize>>;
 
     /// Receives data from the socket.
     ///
     /// On success, returns the number of bytes read.
-    fn read(&self, stream: &Handle, buf: &mut [u8]) -> CancelablePoll<io::Result<usize>>;
+    fn read(
+        &self,
+        waker: Waker,
+        stream: &Handle,
+        buf: &mut [u8],
+    ) -> CancelablePoll<io::Result<usize>>;
+}
+
+/// A wrapper of transport listener.
+pub struct TransportListener<'a> {
+    /// underlying transport implementation.
+    transport: &'a dyn Transport,
+    /// the handle of transport listener.
+    handle: Handle,
+}
+
+impl<'a> TransportListener<'a> {
+    /// Create a new transport listener and bind it to `multiaddr`.
+    ///
+    /// The listener will be closed when the object drops.
+    pub async fn bind(multiaddr: &Multiaddr, transport: &'a dyn Transport) -> io::Result<Self> {
+        let handle =
+            cancelable_would_block(|cx| transport.bind(cx.waker().clone(), multiaddr)).await?;
+
+        Ok(Self { transport, handle })
+    }
+
+    /// Accept a newly incoming transport connection.
+    ///
+    /// On success, returns the transport's bi-directional stream handle.
+    pub async fn accept(&self) -> io::Result<TransportStream<'a>> {
+        let handle =
+            cancelable_would_block(|cx| self.transport.accept(cx.waker().clone(), &self.handle))
+                .await?;
+
+        Ok(TransportStream::new(handle, self.transport))
+    }
+}
+
+/// A wrapper of transport connection stream.
+pub struct TransportStream<'a> {
+    /// underlying transport implementation.
+    transport: &'a dyn Transport,
+    /// the handle of transport listener.
+    handle: Handle,
+    /// A handle to cancel read pending operator.
+    cancelable_read_handle: Option<Handle>,
+    /// A handle to cancel write pending operator.
+    cancelable_write_handle: Option<Handle>,
+}
+
+impl<'a> TransportStream<'a> {
+    fn new(handle: Handle, transport: &'a dyn Transport) -> Self {
+        Self {
+            handle,
+            transport,
+            cancelable_read_handle: None,
+            cancelable_write_handle: None,
+        }
+    }
+
+    /// Create a new transport socket and establish a connection to `raddr`.
+    pub async fn connect(raddr: &Multiaddr, transport: &'a dyn Transport) -> io::Result<Self> {
+        let handle =
+            cancelable_would_block(|cx| transport.connect(cx.waker().clone(), raddr)).await?;
+
+        Ok(Self::new(handle, transport))
+    }
+}
+
+impl<'a> AsyncRead for TransportStream<'a> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        match self.transport.read(cx.waker().clone(), &self.handle, buf) {
+            CancelablePoll::Ready(r) => Poll::Ready(r),
+            CancelablePoll::Pending(handle) => {
+                self.cancelable_read_handle = Some(handle);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<'a> AsyncWrite for TransportStream<'a> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.transport.write(cx.waker().clone(), &self.handle, buf) {
+            CancelablePoll::Ready(r) => Poll::Ready(r),
+            CancelablePoll::Pending(handle) => {
+                self.cancelable_write_handle = Some(handle);
+                Poll::Pending
+            }
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.transport.shutdown(&self.handle, Shutdown::Both)?;
+
+        Poll::Ready(Ok(()))
+    }
 }

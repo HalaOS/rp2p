@@ -41,3 +41,5 @@ windows-sys = "^0.52"
 
 # libp2p
 multiaddr = "^0.18"
+identity = {version = "^0.2", package = "libp2p-identity"}
+semver = "^1.0"

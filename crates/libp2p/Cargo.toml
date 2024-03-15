@@ -12,4 +12,9 @@ readme = "../../README.md"
 
 [dependencies]
 multiaddr = {workspace = true}
+identity = {workspace = true}
+semver = {workspace = true}
+bytes =  {workspace = true}
+thiserror =  {workspace = true}
+
 rasi = {workspace = true}
