@@ -29,7 +29,11 @@ pub enum SwitchHandle {
     SecureUpgrade(SwitchId, Handle),
 
     /// With muxing upgraded handle.
-    MuxingUpgrade(SwitchId, Handle),
+    MuxingUpgrade {
+        service: SwitchId,
+        stream_handle: Handle,
+        connection_handle: Handle,
+    },
 }
 
 pub struct SwitchStream {}
@@ -43,7 +47,7 @@ struct SwitchImmutable {
     secure_upgrade: Box<dyn SecureUpgrade>,
 }
 
-/// A switch is the context of all other libp2p objects.
+/// A switch is entry of the libp2p network.
 ///
 /// This is the first thing you create when using libp2p.
 /// Its primary use is to dail an outbound connection and accept newly incoming connection.
@@ -54,6 +58,14 @@ struct SwitchImmutable {
 /// * configure the transport stack.
 /// * configure the secure upgrader instance.
 /// * configure the muxing upgrader instance.
+///
+/// # Unhandle features
+///
+/// Unlike the golang implementation, those features are not the `Switch`'s responsiblity:
+///
+/// - ***peer manage***
+/// - ***connection pool for peers***
+/// - ***other application level protocols***
 #[allow(unused)]
 pub struct Switch {
     immutable: Arc<SwitchImmutable>,
@@ -83,20 +95,24 @@ pub struct SwitchBuilder {
 }
 
 impl SwitchBuilder {
-    /// Add a new transport type to the switch.
+    /// Add a new transport provider to the switch.
+    ///
+    /// Allows multiple registrations of the same transport type with different configurations.
     pub fn register_transport<T: Transport + 'static>(mut self, transport: T) -> Self {
         self.transports.push(Box::new(transport));
         self
     }
 
-    /// Set the switch's default muxing service provider.
+    /// Set the switch's muxing service,
+    /// otherwise the builder will use [`Yamux`] as the default muxing service.
     pub fn muxing<M: Multiplexing + 'static>(mut self, value: M) -> Self {
         self.muxing = Some(Box::new(value));
 
         self
     }
 
-    /// Set the switch's default secure upgrade service provider.
+    /// Set the switch's secure upgrade service,
+    /// otherwise the builder will use [`TlsHandshake`] as the default upgrade service.
     pub fn secure_upgrade<S: SecureUpgrade + 'static>(mut self, value: S) -> Self {
         self.secure_upgrade = Some(Box::new(value));
 

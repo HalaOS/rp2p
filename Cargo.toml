@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 repository = "https://github.com/HalaOS/rasi-libp2p.git"
-version = "0.1.9"
+version = "0.1.0"
 
 [workspace.dependencies]
 rasi = { path = "rasi/crates/rasi", version = "^0.1" }
@@ -17,7 +17,6 @@ rasi-spec = { path = "rasi/crates/spec", version = "^0.1" }
 
 log = { version = "^0.4" }
 pretty_env_logger = "^0.5"
-
 
 
 # rasi deps
