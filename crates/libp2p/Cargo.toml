@@ -14,8 +14,11 @@ readme = "../../README.md"
 multiaddr = {workspace = true}
 identity = {workspace = true}
 semver = {workspace = true}
-bytes =  {workspace = true}
-thiserror =  {workspace = true}
+bytes = {workspace = true}
+thiserror = {workspace = true}
+bitmask-enum = {workspace = true}
 
 rasi = {workspace = true}
 rasi-ext = {workspace = true}
+
+futures = {workspace = true, features = ["executor"]}
