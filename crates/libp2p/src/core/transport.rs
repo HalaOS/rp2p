@@ -18,7 +18,7 @@
 //! This means that the decision of what transport protocol to use is up to the developer,
 //! and an application can support many different transports at the same time.
 
-use std::{io, net::Shutdown, sync::OnceLock, task::Waker};
+use std::{io, net::Shutdown, task::Waker};
 
 use bitmask_enum::bitmask;
 use identity::PublicKey;
@@ -73,13 +73,17 @@ pub trait Transport: Send + Sync {
     ///
     /// # Parameters
     /// - ***stream*** The handle of transport's bi-directional stream.
-    fn shutdown(&self, stream: &Handle, how: Shutdown) -> io::Result<()>;
+    fn shutdown(&self, connectoin_or_stream: &Handle, how: Shutdown) -> io::Result<()>;
 
     /// Sends data on the stream to the remote address.
     ///
     /// On success, returns the number of bytes written.
-    fn write(&self, waker: Waker, stream: &Handle, buf: &[u8])
-        -> CancelablePoll<io::Result<usize>>;
+    fn write(
+        &self,
+        waker: Waker,
+        connectoin_or_stream: &Handle,
+        buf: &[u8],
+    ) -> CancelablePoll<io::Result<usize>>;
 
     /// Receives data from the socket.
     ///
@@ -87,7 +91,7 @@ pub trait Transport: Send + Sync {
     fn read(
         &self,
         waker: Waker,
-        stream: &Handle,
+        connectoin_or_stream: &Handle,
         buf: &mut [u8],
     ) -> CancelablePoll<io::Result<usize>>;
 
@@ -95,73 +99,25 @@ pub trait Transport: Send + Sync {
     ///
     /// Transport protocols with native security features must
     /// return the peer's public key used by the underlying transmisson protocol.
-    fn public_key_of(&self, stream: &Handle) -> Option<PublicKey>;
-}
-
-static TRANSPORT_LAYER: OnceLock<Vec<Box<dyn Transport>>> = OnceLock::new();
-
-/// A builder to create libp2p’s transport layer.
-///
-/// Before calling the function [`transport_of`], you must call this `builder` to create the libp2p transport layer.
-///
-/// # Examples
-///
-/// ```no_run
-/// # fn main() -> std::io::Result<()> { futures::executor::block_on(async {
-/// #
-/// use rasi_libp2p::syscall::*;
-/// // create an empty transport layer.
-/// TransportLayerBuilder::new().create();
-/// assert!(transport_of("/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap()).is_none());
-/// #
-/// # Ok(()) }) }
-/// ```
-#[derive(Default)]
-pub struct TransportLayerBuilder {
-    layer: Vec<Box<dyn Transport>>,
-}
-
-impl TransportLayerBuilder {
-    /// Create `TransportLayerBuilder` with default configuration.
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    /// Register new transport type into the libp2p’s transport layer.
-    pub fn register<T: Transport + 'static>(mut self, transport: T) -> Self {
-        self.layer.push(Box::new(transport));
-        self
-    }
-
-    /// Consume self and create the transport layer of the libp2p framework.
     ///
-    /// # Panic
-    ///
-    /// Call this function more than once, will cause a panic with the message:
-    ///
-    /// ***`Call transport layer builder more than once.`***
-    pub fn create(self) {
-        if TRANSPORT_LAYER.set(self.layer).is_err() {
-            panic!("Call transport layer builder more than once.")
-        }
-    }
-}
+    /// [`Transport type`](Transport::transport_type) with [`SecureUpgrade`](TransportType::SecureUpgrade) should always returns [`None`].
+    fn public_key_of(&self, connection: &Handle) -> Option<PublicKey>;
 
-/// Select one transport to handle the protocol traffic indicated by the `multiaddr`.
-///
-/// This function may returns `None` if no transport exact match the `multiaddr`.
-///
-/// If call this function before calling [`TransportLayerBuilder`],
-/// will cause a panic with the message:
-///
-/// ***The libp2p transport layer is not exists, call `TransportLayerBuilder` to create it***
-pub fn transport_of(multiaddr: Multiaddr) -> Option<&'static dyn Transport> {
-    TRANSPORT_LAYER
-        .get()
-        .expect(
-            "The libp2p transport layer is not exists, call `TransportLayerBuilder` to create it",
-        )
-        .iter()
-        .find(|t| t.transport_hint(&multiaddr))
-        .map(|t| t.as_ref())
+    /// A transport with native multiplexing, call this function to establish a new outbound stream to peer.
+    ///
+    /// The transport that not support native multiplexing, should always returns error.
+    fn muxing_connect(
+        &self,
+        waker: Waker,
+        connection: &Handle,
+    ) -> CancelablePoll<io::Result<Handle>>;
+
+    /// A transport with native multiplexing, call this function to accept a newly inbound stream from peer.
+    ///
+    /// The transport that not support native multiplexing, should always returns error.
+    fn muxing_accept(
+        &self,
+        waker: Waker,
+        connection: &Handle,
+    ) -> CancelablePoll<io::Result<Handle>>;
 }

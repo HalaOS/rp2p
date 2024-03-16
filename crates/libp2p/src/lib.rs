@@ -1,1 +1,1 @@
-pub mod syscall;
+pub mod core;
