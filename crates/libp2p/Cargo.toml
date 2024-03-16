@@ -18,3 +18,4 @@ bytes =  {workspace = true}
 thiserror =  {workspace = true}
 
 rasi = {workspace = true}
+rasi-ext = {workspace = true}

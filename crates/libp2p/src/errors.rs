@@ -17,3 +17,6 @@ impl From<P2pError> for io::Error {
         io::Error::new(io::ErrorKind::InvalidData, value)
     }
 }
+
+/// A type alias of [`Result<T, P2pError>`]
+pub type P2pResult<T> = Result<T, P2pError>;

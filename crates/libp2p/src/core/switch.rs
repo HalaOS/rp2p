@@ -14,12 +14,54 @@
 //! Peers use protocol negotiation to agree on a commonly supported multiplexer,
 //! which upgrades a “raw” transport connection into a muxed connection capable of opening new streams.
 
-use std::{collections::HashMap, fmt::Debug, io, sync::Arc};
+use std::{collections::HashMap, io, sync::Arc};
+
+use rasi::channel::mpsc::Sender;
+use rasi_ext::utils::{Lockable, SpinMutex};
+
+use crate::errors::{P2pError, P2pResult};
 
 use super::{
-    protocol::{Protocol, ProtocolHandler, ProtocolId},
+    protocol::{ProtocolId, ProtocolStream},
     transport::Transport,
+    upgrader::{NoopUpgrader, Upgrader},
 };
+
+type BoxMatchFn = Arc<Box<dyn Fn(ProtocolId) -> bool>>;
+
+#[derive(Default)]
+struct SwitchDispatch {
+    exact_match_handlers: HashMap<ProtocolId, (BoxMatchFn, Sender<ProtocolStream>)>,
+}
+
+impl SwitchDispatch {
+    fn register<F>(
+        &mut self,
+        protocol_id: ProtocolId,
+        match_f: F,
+        sender: Sender<ProtocolStream>,
+    ) -> P2pResult<()>
+    where
+        F: Fn(ProtocolId) -> bool + 'static,
+    {
+        if self
+            .exact_match_handlers
+            .insert(
+                protocol_id.clone(),
+                (Arc::new(Box::new(match_f)), sender.clone()),
+            )
+            .is_some()
+        {
+            return Err(P2pError::RegisterProtocolId);
+        }
+
+        Ok(())
+    }
+
+    fn unregister(&mut self, protocol_id: &ProtocolId) {
+        self.exact_match_handlers.remove(protocol_id);
+    }
+}
 
 /// The main state of a libp2p application.
 ///
@@ -27,38 +69,59 @@ use super::{
 #[derive(Clone)]
 pub struct Switch {
     #[allow(unused)]
-    inner: Arc<SwitchBuilder>,
+    immutable_state: Arc<SwitchBuilder>,
+    /// dispatcher for newly incoming protocol stream.
+    dispatch: Arc<SpinMutex<SwitchDispatch>>,
 }
 
 impl Switch {
     /// Create a [`switch builder`] to build a new `Switch` instance.
     pub fn new() -> SwitchBuilder {
-        SwitchBuilder::default()
+        SwitchBuilder::new(NoopUpgrader {})
+    }
+
+    /// Register handler for newly incoming protocol stream.
+    ///
+    /// Returns error [`P2pError::RegisterProtocolId`], if register same `protocol_id` more than once.
+    pub fn register_protocol_handler<F>(
+        &self,
+        protocol_id: ProtocolId,
+        match_f: F,
+        sender: Sender<ProtocolStream>,
+    ) -> P2pResult<()>
+    where
+        F: Fn(ProtocolId) -> bool + 'static,
+    {
+        self.dispatch.lock().register(protocol_id, match_f, sender)
+    }
+
+    /// Unregister protocol stream handler by `protocol_id`
+    pub fn unregister_protocol_handler(&self, protocol_id: &ProtocolId) {
+        self.dispatch.lock().unregister(protocol_id)
     }
 }
 
 /// A builder for libp2p [`Switch`] instance.
 pub struct SwitchBuilder {
-    /// registered libp2p application protocols.
-    protocols: HashMap<ProtocolId, Box<dyn Protocol>>,
     /// registered libp2p transport.
     transports: Vec<Box<dyn Transport>>,
-}
-
-impl Default for SwitchBuilder {
-    fn default() -> Self {
-        Self {
-            protocols: Default::default(),
-            transports: Default::default(),
-        }
-    }
+    /// upgrader for the transport connection.
+    upgrader: Arc<Box<dyn Upgrader>>,
 }
 
 impl SwitchBuilder {
+    fn new<U: Upgrader + 'static>(upgrader: U) -> Self {
+        Self {
+            transports: Default::default(),
+            upgrader: Arc::new(Box::new(upgrader)),
+        }
+    }
+
     /// Consume the builder and create the final product [`Switch`].
     pub fn create(self) -> io::Result<Switch> {
         Ok(Switch {
-            inner: Arc::new(self),
+            immutable_state: Arc::new(self),
+            dispatch: Default::default(),
         })
     }
 
@@ -69,47 +132,5 @@ impl SwitchBuilder {
     {
         self.transports.push(Box::new(transport));
         self
-    }
-
-    /// Register new libp2p protocol handler to this switch
-    ///
-    /// # panic
-    ///
-    /// If register protocol with same [`protocol id`](Protocol::id) twice.
-    pub fn register_protocol<P>(mut self, protocol: P) -> Self
-    where
-        P: Protocol + 'static,
-    {
-        let protocol_id = protocol.id();
-        if self
-            .protocols
-            .insert(protocol.id(), Box::new(protocol))
-            .is_some()
-        {
-            panic!("Register protocol {} twice", protocol_id);
-        }
-
-        self
-    }
-
-    /// See [`register_protocol`](Self::register_protocol) for more information.
-    pub fn register_protocol_handler<P>(self, protocol: P) -> Self
-    where
-        P: TryInto<ProtocolHandler>,
-        P::Error: Debug,
-    {
-        self.register_protocol(protocol.try_into().unwrap())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Switch;
-
-    #[test]
-    fn test_register_protocol() {
-        Switch::new().register_protocol_handler(("/test", |_, _, _| {}));
-
-        Switch::new().register_protocol_handler(("/test/1.0", |_| true, |_, _, _| {}));
     }
 }

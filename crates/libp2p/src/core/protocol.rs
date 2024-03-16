@@ -19,13 +19,18 @@
 //! using the recommended path structure with a version component is both
 //! developer-friendly and enables easier matching by version.***
 
-use std::{borrow::Cow, fmt::Display};
+use std::{borrow::Cow, fmt::Display, io, sync::Arc};
 
+use rasi::{
+    channel::mpsc::{self, Receiver},
+    stream::StreamExt,
+    syscall::Handle,
+};
 use semver::Version;
 
 use crate::errors::P2pError;
 
-use super::switch::Switch;
+use super::{switch::Switch, upgrader::Upgrader};
 
 /// The protocol id type for libp2p protocols.
 ///
@@ -135,104 +140,92 @@ impl ProtocolId {
     }
 }
 
-/// A trait that represents a [`libp2p protocol`],
-/// that combines the two types of protocol handles described in the
-/// [**official documentation**](https://docs.libp2p.io/concepts/fundamentals/protocols/)
-pub trait Protocol {
-    /// The exact match `protocol id`
-    fn id(&self) -> ProtocolId;
-
-    /// When a stream request comes in whose protocol id doesn’t have any exact matches,
-    /// the protocol id will be passed through all of the registered `match_fn` functions.
-    /// If any returns true, the associated handler Protocol trait's [`accept`](Protocol::accept) function will be invoked.
-    fn match_fn(&self, request: ProtocolId) -> bool;
-
-    /// The protocol register handler function.
-    fn accept(&mut self, switch: Switch, request: ProtocolId, stream: ProtocolStream);
+/// A socket for libp2p protocol to listen and accept newly incoming connection.
+///
+/// `The switch` will close the socket when this instance drops.
+pub struct ProtocolListener {
+    /// local bound protocol_id
+    protocol_id: ProtocolId,
+    /// the core state of libp2p instance.
+    switch: Switch,
+    /// newly incoming stream receiver.
+    receiver: Receiver<ProtocolStream>,
 }
 
-/// Wrapping `protocol handle function` into [`protocol`] types
-pub struct ProtocolHandler {
-    id: ProtocolId,
-    match_f: Option<Box<dyn Fn(ProtocolId) -> bool>>,
-    accept: Box<dyn FnMut(Switch, ProtocolId, ProtocolStream)>,
-}
-
-impl ProtocolHandler {
-    pub fn new<ID, H>(id: ID, handle: H) -> Result<Self, P2pError>
+impl ProtocolListener {
+    /// Create new `protocol listener` with provided [`Switch`] instance and listen on `protocol_id`.
+    pub fn bind_with<P>(protocol_id: P, switch: Switch) -> io::Result<ProtocolListener>
     where
-        ID: TryInto<ProtocolId>,
-        P2pError: From<ID::Error>,
-        H: FnMut(Switch, ProtocolId, ProtocolStream) + 'static,
+        P: TryInto<ProtocolId>,
+        io::Error: From<P::Error>,
     {
+        let protocol_id = protocol_id.try_into()?;
+
+        let (sender, receiver) = mpsc::channel(0);
+
+        switch.register_protocol_handler(protocol_id.clone(), Self::noop_match, sender)?;
+
         Ok(Self {
-            id: id.try_into()?,
-            match_f: None,
-            accept: Box::new(handle),
+            protocol_id,
+            switch,
+            receiver,
         })
     }
 
-    pub fn new_with_match<ID, M, H>(id: ID, match_f: M, handle: H) -> Result<Self, P2pError>
-    where
-        ID: TryInto<ProtocolId>,
-        P2pError: From<ID::Error>,
-        M: Fn(ProtocolId) -> bool + 'static,
-        H: FnMut(Switch, ProtocolId, ProtocolStream) + 'static,
-    {
-        Ok(Self {
-            id: id.try_into()?,
-            match_f: Some(Box::new(match_f)),
-            accept: Box::new(handle),
-        })
+    fn noop_match(_: ProtocolId) -> bool {
+        false
+    }
+
+    /// Get the [`ProtocolId`] that this listener is bound to.
+    pub fn local_addr(&self) -> &ProtocolId {
+        &self.protocol_id
+    }
+
+    /// Accept newly incoming connection.
+    ///
+    /// Returns none, if the listener is dropping or has been closed.
+    pub async fn accept(&mut self) -> Option<ProtocolStream> {
+        self.receiver.next().await
     }
 }
 
-impl<ID, H> TryFrom<(ID, H)> for ProtocolHandler
-where
-    ID: TryInto<ProtocolId>,
-    P2pError: From<ID::Error>,
-    H: FnMut(Switch, ProtocolId, ProtocolStream) + 'static,
-{
-    type Error = P2pError;
-    fn try_from(value: (ID, H)) -> Result<Self, Self::Error> {
-        Self::new(value.0, value.1)
+impl Drop for ProtocolListener {
+    fn drop(&mut self) {
+        self.switch.unregister_protocol_handler(&self.protocol_id);
     }
 }
 
-impl<ID, M, H> TryFrom<(ID, M, H)> for ProtocolHandler
-where
-    ID: TryInto<ProtocolId>,
-    P2pError: From<ID::Error>,
-    M: Fn(ProtocolId) -> bool + 'static,
-    H: FnMut(Switch, ProtocolId, ProtocolStream) + 'static,
-{
-    type Error = P2pError;
-    fn try_from(value: (ID, M, H)) -> Result<Self, Self::Error> {
-        Self::new_with_match(value.0, value.1, value.2)
-    }
+/// bi-directional binary stream, the applicaton protocol implementor use it to commuicate with peer.
+///
+/// You can call the [`peer_addr`](Self::peer_addr) to get the peer request [`ProtocolId`]
+#[allow(unused)]
+pub struct ProtocolStream {
+    /// Peer request protocol_id
+    peer_addr: ProtocolId,
+    /// The acceptor bound protocol_id
+    local_addr: ProtocolId,
+    /// protocol stream handle.
+    handle: Handle,
+    /// The upgrader of this stream.
+    upgrader: Arc<Box<dyn Upgrader>>,
 }
 
-impl Protocol for ProtocolHandler {
-    fn id(&self) -> ProtocolId {
-        self.id.clone()
-    }
-
-    fn match_fn(&self, request: ProtocolId) -> bool {
-        if let Some(match_f) = self.match_f.as_ref() {
-            match_f(request)
-        } else {
-            false
+impl ProtocolStream {
+    /// Create new `ProtocolStream` with provided parameters.
+    pub fn new(
+        peer_addr: ProtocolId,
+        local_addr: ProtocolId,
+        handle: Handle,
+        upgrader: Arc<Box<dyn Upgrader>>,
+    ) -> Self {
+        Self {
+            peer_addr,
+            local_addr,
+            handle,
+            upgrader,
         }
     }
-
-    fn accept(&mut self, switch: Switch, request: ProtocolId, stream: ProtocolStream) {
-        (self.accept)(switch, request, stream)
-    }
 }
-/// The protocol layer bi-directional data stream.
-///
-/// The protocol `handler` reads and writes unencrypted binary data over the stream.
-pub struct ProtocolStream {}
 
 #[cfg(test)]
 mod tests {
