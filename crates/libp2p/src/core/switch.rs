@@ -1,10 +1,13 @@
 use std::{
     borrow::Borrow,
     collections::VecDeque,
+    io,
+    net::Shutdown,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
+    task::Poll,
 };
 
 use futures::{AsyncRead, AsyncWrite};
@@ -40,49 +43,154 @@ impl SwitchId {
 /// A transport handle that combine the `upgrade` context information.
 pub enum SwitchHandle {
     /// Native transport handle.
-    Transport(SwitchId, Handle),
+    Transport {
+        transport: Arc<Box<dyn Transport>>,
+        handle: Handle,
+        cancel_read: Option<Handle>,
+        cancel_write: Option<Handle>,
+    },
 
     /// With secure upgraded handle.
-    SecureUpgrade(SwitchId, Handle),
+    SecureUpgrade {
+        secure_upgrade: Arc<Box<dyn SecureUpgrade>>,
+        conn_handle: Handle,
+        cancel_read: Option<Handle>,
+        cancel_write: Option<Handle>,
+    },
 
     /// With muxing upgraded handle.
     MuxingUpgrade {
+        muxing: Arc<Box<dyn Multiplexing>>,
         stream_handle: Handle,
-        connection_handle: Arc<Handle>,
+        cancel_read: Option<Handle>,
+        cancel_write: Option<Handle>,
     },
 }
 
 impl AsyncWrite for SwitchHandle {
     fn poll_write(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        todo!()
+        match &mut *self {
+            SwitchHandle::Transport {
+                transport,
+                handle,
+                cancel_read: _,
+                cancel_write,
+            } => match transport.write(cx, handle, buf) {
+                rasi::syscall::CancelablePoll::Ready(r) => Poll::Ready(r),
+                rasi::syscall::CancelablePoll::Pending(handle) => {
+                    *cancel_write = Some(handle);
+                    std::task::Poll::Pending
+                }
+            },
+            SwitchHandle::SecureUpgrade {
+                secure_upgrade,
+                conn_handle: handle,
+                cancel_read: _,
+                cancel_write,
+            } => match secure_upgrade.write(cx, handle, buf) {
+                rasi::syscall::CancelablePoll::Ready(r) => Poll::Ready(r),
+                rasi::syscall::CancelablePoll::Pending(handle) => {
+                    *cancel_write = Some(handle);
+                    std::task::Poll::Pending
+                }
+            },
+            SwitchHandle::MuxingUpgrade {
+                muxing,
+                stream_handle,
+                cancel_read: _,
+                cancel_write,
+            } => match muxing.write(cx, stream_handle, buf) {
+                rasi::syscall::CancelablePoll::Ready(r) => Poll::Ready(r),
+                rasi::syscall::CancelablePoll::Pending(handle) => {
+                    *cancel_write = Some(handle);
+                    std::task::Poll::Pending
+                }
+            },
+        }
     }
 
     fn poll_flush(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        todo!()
+        Poll::Ready(Ok(()))
     }
 
     fn poll_close(
         self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        todo!()
+        match &*self {
+            SwitchHandle::Transport {
+                transport,
+                handle,
+                cancel_read: _,
+                cancel_write: _,
+            } => Poll::Ready(transport.shutdown(handle, Shutdown::Both)),
+            SwitchHandle::SecureUpgrade {
+                secure_upgrade,
+                conn_handle: handle,
+                cancel_read: _,
+                cancel_write: _,
+            } => Poll::Ready(secure_upgrade.shutdown(handle, Shutdown::Both)),
+            SwitchHandle::MuxingUpgrade {
+                muxing,
+                stream_handle,
+                cancel_read: _,
+                cancel_write: _,
+            } => Poll::Ready(muxing.shutdown(stream_handle, Shutdown::Both)),
+        }
     }
 }
 
 impl AsyncRead for SwitchHandle {
     fn poll_read(
-        self: std::pin::Pin<&mut Self>,
+        mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        todo!()
+        match &mut *self {
+            SwitchHandle::Transport {
+                transport,
+                handle,
+                cancel_read,
+                cancel_write: _,
+            } => match transport.read(cx, handle, buf) {
+                rasi::syscall::CancelablePoll::Ready(r) => Poll::Ready(r),
+                rasi::syscall::CancelablePoll::Pending(handle) => {
+                    *cancel_read = Some(handle);
+                    std::task::Poll::Pending
+                }
+            },
+            SwitchHandle::SecureUpgrade {
+                secure_upgrade,
+                conn_handle: handle,
+                cancel_read,
+                cancel_write: _,
+            } => match secure_upgrade.read(cx, handle, buf) {
+                rasi::syscall::CancelablePoll::Ready(r) => Poll::Ready(r),
+                rasi::syscall::CancelablePoll::Pending(handle) => {
+                    *cancel_read = Some(handle);
+                    std::task::Poll::Pending
+                }
+            },
+            SwitchHandle::MuxingUpgrade {
+                muxing,
+                stream_handle,
+                cancel_read,
+                cancel_write: _,
+            } => match muxing.read(cx, stream_handle, buf) {
+                rasi::syscall::CancelablePoll::Ready(r) => Poll::Ready(r),
+                rasi::syscall::CancelablePoll::Pending(handle) => {
+                    *cancel_read = Some(handle);
+                    std::task::Poll::Pending
+                }
+            },
+        }
     }
 }
 
@@ -99,9 +207,9 @@ pub struct SwitchStream {
 /// The immutable context data of switch.
 struct SwitchImmutable {
     keypair: Box<dyn KeyPairManager>,
-    transports: Vec<Box<dyn Transport>>,
-    muxing: Box<dyn Multiplexing>,
-    secure_upgrade: Box<dyn SecureUpgrade>,
+    transports: Vec<Arc<Box<dyn Transport>>>,
+    muxing: Arc<Box<dyn Multiplexing>>,
+    secure_upgrade: Arc<Box<dyn SecureUpgrade>>,
     neigbhors: Box<dyn Neighbors>,
 }
 
@@ -139,6 +247,90 @@ pub struct Switch {
 }
 
 impl Switch {
+    /// This function try select one registered transport to create a newly connection to the peer.
+    ///
+    /// If no valid transport is found, returns [`P2pError::ConnectToPeer`].
+    /// If the transports return some errors when calling the [`connect`](Transport::connect) function,
+    /// this function will returns the latest error to the caller.
+    async fn dial_by_peer_id(&self, peer_id: &PeerId) -> Result<SwitchHandle> {
+        let mut lastest_error: Option<io::Error> = None;
+
+        // loop neighbor's public listening addresses to find a valid transport.
+        for raddr in self.neighbors_get(&peer_id).await? {
+            for transport in &self.immutable.transports {
+                if transport.transport_hint(&raddr) {
+                    match cancelable_would_block(|cx| transport.connect(cx, &raddr)).await {
+                        Ok(transport_conn) => {
+                            return self.upgrade(transport_conn, transport.clone()).await;
+                        }
+                        Err(err) => {
+                            lastest_error = Some(err);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(lastest_error) = lastest_error {
+            Err(lastest_error.into())
+        } else {
+            Err(P2pError::ConnectToPeer)
+        }
+    }
+
+    async fn upgrade(
+        &self,
+        newly_conn: Handle,
+        transport: Arc<Box<dyn Transport>>,
+    ) -> Result<SwitchHandle> {
+        let transport_type = transport.transport_type();
+
+        let mut switch_handle = if transport_type.contains(TransportType::SecureUpgrade) {
+            let secure_conn = self
+                .immutable
+                .secure_upgrade
+                .client(newly_conn, transport)?;
+
+            cancelable_would_block(|cx| self.immutable.secure_upgrade.handshake(cx, &secure_conn))
+                .await?;
+
+            SwitchHandle::SecureUpgrade {
+                secure_upgrade: self.immutable.secure_upgrade.clone(),
+                conn_handle: secure_conn,
+                cancel_read: None,
+                cancel_write: None,
+            }
+        } else {
+            SwitchHandle::Transport {
+                transport,
+                handle: newly_conn,
+                cancel_read: None,
+                cancel_write: None,
+            }
+        };
+
+        if transport_type.contains(TransportType::MuxingUpgrade) {
+            let mux_conn_handle = Arc::new(self.immutable.muxing.create(switch_handle)?);
+
+            // TODO: start identity protocol to exchage peer informations and add the connection into pool.
+
+            let mux_stream_handle =
+                cancelable_would_block(|cx| self.immutable.muxing.open(cx, &mux_conn_handle))
+                    .await?;
+
+            switch_handle = SwitchHandle::MuxingUpgrade {
+                muxing: self.immutable.muxing.clone(),
+                stream_handle: mux_stream_handle,
+                cancel_read: None,
+                cancel_write: None,
+            };
+        }
+
+        Ok(switch_handle)
+    }
+}
+
+impl Switch {
     /// Create a new switch [`builder`](SwitchBuilder) with provided `keypair` to configure the new `Switch`.
     pub fn new<K: KeyPairManager + 'static>(keypair: K) -> SwitchBuilder {
         SwitchBuilder {
@@ -148,6 +340,13 @@ impl Switch {
             secure_upgrade: Default::default(),
             neigbhors: Default::default(),
         }
+    }
+
+    /// Create a newly outbound connection to remote addresses.
+    ///
+    /// On success, returns the peer's id and add put the addresses into [`neighbors`](Neighbors) table.
+    pub async fn connect(&self, _raddr: &[Multiaddr]) -> Result<PeerId> {
+        todo!()
     }
 
     /// Create a newly outbound stream to `peer` with the `protocol_id` request.
@@ -160,10 +359,14 @@ impl Switch {
     ///
     /// This function receives a set of protocols and uses [`multistream-select`](https://github.com/multiformats/multistream-select)
     /// protocol internally to negotiate with the peer about which application layer protocol to be used with the opening stream.
-    pub async fn connect(&self, peer_id: PeerId, protos: &[ProtocolId]) -> Result<SwitchStream> {
+    pub async fn open_stream(
+        &self,
+        peer_id: PeerId,
+        protos: &[ProtocolId],
+    ) -> Result<SwitchStream> {
         let stream_handle = if let Some(stream_handle) = self
             .mux_pool
-            .connect(&*self.immutable.muxing, &peer_id)
+            .connect(self.immutable.muxing.clone(), &peer_id)
             .await
         {
             stream_handle
@@ -181,47 +384,6 @@ impl Switch {
             protocol_id: protocol.try_into()?,
             negotiated_handle,
         })
-    }
-
-    async fn dial_by_peer_id(&self, peer_id: &PeerId) -> Result<SwitchHandle> {
-        let mut lastest_error = None;
-        let mut newly_conn = None;
-        // loop neighbor's public listening addresses to find a valid transport.
-        'out: for raddr in self.neighbors_get(&peer_id).await? {
-            for transport in &self.immutable.transports {
-                if transport.transport_hint(&raddr) {
-                    match cancelable_would_block(|cx| transport.connect(cx, &raddr)).await {
-                        Ok(transport_conn) => {
-                            newly_conn = Some((transport_conn, transport.transport_type()));
-                            break 'out;
-                        }
-                        Err(err) => {
-                            lastest_error = Some(err);
-                        }
-                    }
-                }
-            }
-        }
-
-        if newly_conn.is_none() {
-            if let Some(err) = lastest_error {
-                return Err(err.into());
-            }
-
-            return Err(P2pError::ConnectToPeer);
-        }
-
-        let (newly_conn, transport_type) = newly_conn.unwrap();
-
-        self.upgrade(newly_conn, transport_type).await
-    }
-
-    async fn upgrade(
-        &self,
-        newly_conn: Handle,
-        transport_type: TransportType,
-    ) -> Result<SwitchHandle> {
-        todo!()
     }
 
     /// Accept a newly inbound stream from `peer`.
@@ -319,7 +481,7 @@ impl Switch {
 #[allow(unused)]
 pub struct SwitchBuilder {
     keypair_manager: Box<dyn KeyPairManager>,
-    transports: Vec<Box<dyn Transport>>,
+    transports: Vec<Arc<Box<dyn Transport>>>,
     muxing: Option<Box<dyn Multiplexing>>,
     secure_upgrade: Option<Box<dyn SecureUpgrade>>,
     neigbhors: Option<Box<dyn Neighbors>>,
@@ -330,7 +492,7 @@ impl SwitchBuilder {
     ///
     /// Allows multiple registrations of the same transport type with different configurations.
     pub fn register_transport<T: Transport + 'static>(mut self, transport: T) -> Self {
-        self.transports.push(Box::new(transport));
+        self.transports.push(Arc::new(Box::new(transport)));
         self
     }
 
@@ -356,10 +518,11 @@ impl SwitchBuilder {
             immutable: Arc::new(SwitchImmutable {
                 keypair: self.keypair_manager,
                 transports: self.transports,
-                muxing: self.muxing.unwrap_or(Box::new(Yamux::default())),
-                secure_upgrade: self
-                    .secure_upgrade
-                    .unwrap_or(Box::new(TlsHandshake::default())),
+                muxing: Arc::new(self.muxing.unwrap_or(Box::new(Yamux::default()))),
+                secure_upgrade: Arc::new(
+                    self.secure_upgrade
+                        .unwrap_or(Box::new(TlsHandshake::default())),
+                ),
 
                 neigbhors: self
                     .neigbhors

@@ -1,4 +1,4 @@
-use std::{io, task::Context};
+use std::{io, net::Shutdown, task::Context};
 
 use rasi::syscall::{CancelablePoll, Handle};
 
@@ -21,15 +21,33 @@ use super::SwitchHandle;
 /// the only ones running on that connection. Another example is when HTTP/2 introduced streams into HTTP,
 /// allowing for many HTTP requests in parallel on the same connection.
 pub trait Multiplexing: Send + Sync {
-    fn create(
-        &self,
-        cx: &mut Context<'_>,
-        handle: SwitchHandle,
-    ) -> CancelablePoll<io::Result<Handle>>;
+    fn create(&self, handle: SwitchHandle) -> io::Result<Handle>;
 
     fn open(&self, cx: &mut Context<'_>, mux_conn: &Handle) -> CancelablePoll<io::Result<Handle>>;
     fn accept(&self, cx: &mut Context<'_>, mux_conn: &Handle)
         -> CancelablePoll<io::Result<Handle>>;
+
+    /// Sends data on the stream to the remote address.
+    ///
+    /// On success, returns the number of bytes written.
+    fn write(
+        &self,
+        cx: &mut Context<'_>,
+        stream: &Handle,
+        buf: &[u8],
+    ) -> CancelablePoll<io::Result<usize>>;
+
+    /// Receives data from the socket.
+    ///
+    /// On success, returns the number of bytes read.
+    fn read(
+        &self,
+        cx: &mut Context<'_>,
+        stream: &Handle,
+        buf: &mut [u8],
+    ) -> CancelablePoll<io::Result<usize>>;
+
+    fn shutdown(&self, connectoin_or_stream: &Handle, how: Shutdown) -> io::Result<()>;
 }
 
 #[derive(Default)]
@@ -37,11 +55,7 @@ pub struct Yamux {}
 
 #[allow(unused)]
 impl Multiplexing for Yamux {
-    fn create(
-        &self,
-        cx: &mut Context<'_>,
-        handle: SwitchHandle,
-    ) -> CancelablePoll<io::Result<Handle>> {
+    fn create(&self, handle: SwitchHandle) -> io::Result<Handle> {
         todo!()
     }
 
@@ -54,6 +68,28 @@ impl Multiplexing for Yamux {
         cx: &mut Context<'_>,
         mux_conn: &Handle,
     ) -> CancelablePoll<io::Result<Handle>> {
+        todo!()
+    }
+
+    fn write(
+        &self,
+        cx: &mut Context<'_>,
+        stream: &Handle,
+        buf: &[u8],
+    ) -> CancelablePoll<io::Result<usize>> {
+        todo!()
+    }
+
+    fn read(
+        &self,
+        cx: &mut Context<'_>,
+        stream: &Handle,
+        buf: &mut [u8],
+    ) -> CancelablePoll<io::Result<usize>> {
+        todo!()
+    }
+
+    fn shutdown(&self, connectoin_or_stream: &Handle, how: Shutdown) -> io::Result<()> {
         todo!()
     }
 }

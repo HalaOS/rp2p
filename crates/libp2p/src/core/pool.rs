@@ -30,7 +30,7 @@ impl MuxingPool {
     /// Try to start a new muxing stream from a muxing connection in this pool.
     pub async fn connect(
         &self,
-        muxing: &dyn Multiplexing,
+        muxing: Arc<Box<dyn Multiplexing>>,
         peer_id: &PeerId,
     ) -> Option<SwitchHandle> {
         let conns = {
@@ -48,8 +48,10 @@ impl MuxingPool {
                         self.close_conns(peer_id, &dropping).await;
 
                         return Some(SwitchHandle::MuxingUpgrade {
+                            muxing: muxing.clone(),
                             stream_handle,
-                            connection_handle,
+                            cancel_read: None,
+                            cancel_write: None,
                         });
                     }
                     Err(err) => {
