@@ -18,7 +18,7 @@
 //! This means that the decision of what transport protocol to use is up to the developer,
 //! and an application can support many different transports at the same time.
 
-use std::{io, net::Shutdown, task::Waker};
+use std::{io, net::Shutdown, task::Context};
 
 use bitmask_enum::bitmask;
 use identity::PublicKey;
@@ -59,15 +59,24 @@ pub trait Transport: Send + Sync {
     /// Create a new transport listener and bind it to `multiaddr`.
     ///
     /// The listener will be closed when the returns handle drops.
-    fn bind(&self, waker: Waker, multiaddr: &Multiaddr) -> CancelablePoll<io::Result<Handle>>;
+    fn bind(
+        &self,
+        cx: &mut Context<'_>,
+        multiaddr: &Multiaddr,
+    ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Accept a newly incoming transport connection.
     ///
     /// On success, returns the transport's bi-directional stream handle.
-    fn accept(&self, waker: Waker, listener: &Handle) -> CancelablePoll<io::Result<Handle>>;
+    fn accept(&self, cx: &mut Context<'_>, listener: &Handle)
+        -> CancelablePoll<io::Result<Handle>>;
 
     /// Create a new transport socket and establish a connection to `raddr`.
-    fn connect(&self, waker: Waker, raddr: &Multiaddr) -> CancelablePoll<io::Result<Handle>>;
+    fn connect(
+        &self,
+        cx: &mut Context<'_>,
+        raddr: &Multiaddr,
+    ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Shutdown the reading and writing portions of the transport connection.
     ///
@@ -80,7 +89,7 @@ pub trait Transport: Send + Sync {
     /// On success, returns the number of bytes written.
     fn write(
         &self,
-        waker: Waker,
+        cx: &mut Context<'_>,
         connectoin_or_stream: &Handle,
         buf: &[u8],
     ) -> CancelablePoll<io::Result<usize>>;
@@ -90,7 +99,7 @@ pub trait Transport: Send + Sync {
     /// On success, returns the number of bytes read.
     fn read(
         &self,
-        waker: Waker,
+        cx: &mut Context<'_>,
         connectoin_or_stream: &Handle,
         buf: &mut [u8],
     ) -> CancelablePoll<io::Result<usize>>;
@@ -108,7 +117,7 @@ pub trait Transport: Send + Sync {
     /// The transport that not support native multiplexing, should always returns error.
     fn muxing_connect(
         &self,
-        waker: Waker,
+        cx: &mut Context<'_>,
         connection: &Handle,
     ) -> CancelablePoll<io::Result<Handle>>;
 
@@ -117,7 +126,7 @@ pub trait Transport: Send + Sync {
     /// The transport that not support native multiplexing, should always returns error.
     fn muxing_accept(
         &self,
-        waker: Waker,
+        cx: &mut Context<'_>,
         connection: &Handle,
     ) -> CancelablePoll<io::Result<Handle>>;
 }

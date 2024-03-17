@@ -13,4 +13,12 @@ pub use secure::*;
 mod key;
 pub use key::*;
 
+mod protocol;
+pub use protocol::*;
+
+mod neighbors;
+pub use neighbors::*;
+
+mod pool;
+
 // pub use multiaddr::Multiaddr;

@@ -1,3 +1,9 @@
+use std::{io, task::Context};
+
+use rasi::syscall::{CancelablePoll, Handle};
+
+use super::SwitchHandle;
+
 /// # Overview
 /// libp2p is built on top of a stream abstraction and uses a bi-directional message stream to send data between peers.
 /// However, relying on a single message stream over a connection between two peers can result in scalability issues
@@ -14,9 +20,40 @@
 /// Stream multiplexing makes it so that applications or protocols running on top of libp2p think that they’re
 /// the only ones running on that connection. Another example is when HTTP/2 introduced streams into HTTP,
 /// allowing for many HTTP requests in parallel on the same connection.
-pub trait Multiplexing: Send + Sync {}
+pub trait Multiplexing: Send + Sync {
+    fn create(
+        &self,
+        cx: &mut Context<'_>,
+        handle: SwitchHandle,
+    ) -> CancelablePoll<io::Result<Handle>>;
+
+    fn open(&self, cx: &mut Context<'_>, mux_conn: &Handle) -> CancelablePoll<io::Result<Handle>>;
+    fn accept(&self, cx: &mut Context<'_>, mux_conn: &Handle)
+        -> CancelablePoll<io::Result<Handle>>;
+}
 
 #[derive(Default)]
 pub struct Yamux {}
 
-impl Multiplexing for Yamux {}
+#[allow(unused)]
+impl Multiplexing for Yamux {
+    fn create(
+        &self,
+        cx: &mut Context<'_>,
+        handle: SwitchHandle,
+    ) -> CancelablePoll<io::Result<Handle>> {
+        todo!()
+    }
+
+    fn open(&self, cx: &mut Context<'_>, mux_conn: &Handle) -> CancelablePoll<io::Result<Handle>> {
+        todo!()
+    }
+
+    fn accept(
+        &self,
+        cx: &mut Context<'_>,
+        mux_conn: &Handle,
+    ) -> CancelablePoll<io::Result<Handle>> {
+        todo!()
+    }
+}

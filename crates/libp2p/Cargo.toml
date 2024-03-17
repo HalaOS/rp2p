@@ -17,6 +17,8 @@ semver = {workspace = true}
 bytes = {workspace = true}
 thiserror = {workspace = true}
 bitmask-enum = {workspace = true}
+log = {workspace = true}
+multistream-select = {workspace = true}
 
 rasi = {workspace = true}
 rasi-ext = {workspace = true}

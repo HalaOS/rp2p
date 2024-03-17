@@ -46,3 +46,4 @@ serde_json = {version = "^1.0"}
 multiaddr = "^0.18"
 identity = {version = "^0.2", package = "libp2p-identity"}
 semver = "^1.0"
+multistream-select = "^0.13"
