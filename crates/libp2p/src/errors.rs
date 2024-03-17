@@ -20,6 +20,9 @@ pub enum P2pError {
     #[error("Can't directly connect to peer for peer is not the neighbor or the no transport support peer's public listening addrs.")]
     ConnectToPeer,
 
+    #[error("The peer id fetched by the Identify protocol, is mismatched with provided one or is mismatched with channel secure public key.")]
+    UnexpectPeerId,
+
     #[error("Can't find property transport to start the listener with addr: {0}")]
     BindMultiAddr(Multiaddr),
 
