@@ -7,7 +7,7 @@ use rasi::syscall::CancelablePoll;
 /// Neighbors is a set of libp2p peers, that can be directly connected by switch.
 ///
 /// This trait provides a set of functions to get/update/delete the peer's route information in the `Neighbors`.
-pub trait Neighbors {
+pub trait Neighbors: Sync + Send {
     /// manually update a route for the neighbor peer by [`id`](PeerId).
     fn neighbors_put(
         &self,

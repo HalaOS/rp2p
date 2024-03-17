@@ -20,6 +20,9 @@ pub enum P2pError {
     #[error("Can't directly connect to peer for peer is not the neighbor or the no transport support peer's public listening addrs.")]
     ConnectToPeer,
 
+    #[error("Can't find property transport to start the listener with addr: {0}")]
+    BindMultiAddr(Multiaddr),
+
     #[error(transparent)]
     NegotiationErr(#[from] NegotiationError),
 }

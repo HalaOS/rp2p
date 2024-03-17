@@ -14,7 +14,7 @@ use futures::{AsyncRead, AsyncWrite};
 use identity::PeerId;
 use multiaddr::Multiaddr;
 use multistream_select::{dialer_select_proto, Negotiated, Version};
-use rasi::{syscall::Handle, utils::cancelable_would_block};
+use rasi::{executor::spawn, syscall::Handle, utils::cancelable_would_block};
 use rasi_ext::{
     future::event_map::EventMap,
     utils::{AsyncLockable, AsyncSpinMutex},
@@ -65,6 +65,38 @@ pub enum SwitchHandle {
         cancel_read: Option<Handle>,
         cancel_write: Option<Handle>,
     },
+}
+
+impl SwitchHandle {
+    pub fn transport(transport: Arc<Box<dyn Transport>>, handle: Handle) -> Self {
+        Self::Transport {
+            transport,
+            handle,
+            cancel_read: None,
+            cancel_write: None,
+        }
+    }
+
+    pub fn secure_upgrade(
+        secure_upgrade: Arc<Box<dyn SecureUpgrade>>,
+        conn_handle: Handle,
+    ) -> Self {
+        Self::SecureUpgrade {
+            secure_upgrade,
+            conn_handle,
+            cancel_read: None,
+            cancel_write: None,
+        }
+    }
+
+    pub fn mux_upgrade(muxing: Arc<Box<dyn Multiplexing>>, stream_handle: Handle) -> Self {
+        Self::MuxingUpgrade {
+            muxing,
+            stream_handle,
+            cancel_read: None,
+            cancel_write: None,
+        }
+    }
 }
 
 impl AsyncWrite for SwitchHandle {
@@ -203,9 +235,9 @@ pub struct SwitchStream {
     negotiated_handle: Negotiated<SwitchHandle>,
 }
 
-#[allow(unused)]
 /// The immutable context data of switch.
 struct SwitchImmutable {
+    #[allow(unused)]
     keypair: Box<dyn KeyPairManager>,
     transports: Vec<Arc<Box<dyn Transport>>>,
     muxing: Arc<Box<dyn Multiplexing>>,
@@ -239,6 +271,7 @@ enum SwitchEvent {
 /// * configure the secure upgrader instance.
 /// * configure the muxing upgrader instance.
 #[allow(unused)]
+#[derive(Clone)]
 pub struct Switch {
     immutable: Arc<SwitchImmutable>,
     mutable: Arc<AsyncSpinMutex<SwitchMutable>>,
@@ -257,15 +290,13 @@ impl Switch {
 
         // loop neighbor's public listening addresses to find a valid transport.
         for raddr in self.neighbors_get(&peer_id).await? {
-            for transport in &self.immutable.transports {
-                if transport.transport_hint(&raddr) {
-                    match cancelable_would_block(|cx| transport.connect(cx, &raddr)).await {
-                        Ok(transport_conn) => {
-                            return self.upgrade(transport_conn, transport.clone()).await;
-                        }
-                        Err(err) => {
-                            lastest_error = Some(err);
-                        }
+            if let Some(transport) = self.transport_of(&raddr) {
+                match cancelable_would_block(|cx| transport.connect(cx, &raddr)).await {
+                    Ok(transport_conn) => {
+                        return self.upgrade(transport_conn, transport.clone()).await;
+                    }
+                    Err(err) => {
+                        lastest_error = Some(err);
                     }
                 }
             }
@@ -276,6 +307,15 @@ impl Switch {
         } else {
             Err(P2pError::ConnectToPeer)
         }
+    }
+
+    fn transport_of(&self, addr: &Multiaddr) -> Option<Arc<Box<dyn Transport>>> {
+        for transport in &self.immutable.transports {
+            if transport.transport_hint(addr) {
+                return Some(transport.clone());
+            }
+        }
+        None
     }
 
     async fn upgrade(
@@ -314,6 +354,8 @@ impl Switch {
 
             // TODO: start identity protocol to exchage peer informations and add the connection into pool.
 
+            // self.mux_pool.put(peer_id, mux_conn_handle.clone());
+
             let mux_stream_handle =
                 cancelable_would_block(|cx| self.immutable.muxing.open(cx, &mux_conn_handle))
                     .await?;
@@ -339,6 +381,7 @@ impl Switch {
             muxing: Default::default(),
             secure_upgrade: Default::default(),
             neigbhors: Default::default(),
+            laddrs: vec![],
         }
     }
 
@@ -412,29 +455,6 @@ impl Switch {
         }
     }
 
-    /// Create a transport listener and bind it on `local_addr`.
-    ///
-    /// On success, returns the [`SwitchId`] of listener.
-    ///
-    /// If there is no exact match `transport` to create incoming connection listener, returns the error
-    /// [`TransportNotFound`](crate::errors::P2pError::TransportNotFound).
-    pub async fn bind<M: Borrow<Multiaddr>>(&self, _local_addr: M) -> Result<SwitchId> {
-        todo!()
-    }
-
-    /// The batch bind function to create a group of listeners.
-    ///
-    /// On success, returns the [`SwitchId`] of the listeners.
-    pub async fn bind_all(&self, local_addrs: &[Multiaddr]) -> Result<Vec<SwitchId>> {
-        let mut ids = vec![];
-
-        for laddr in local_addrs {
-            ids.push(self.bind(laddr).await?);
-        }
-
-        Ok(ids)
-    }
-
     /// Close and remove the transport listener from this switch by `id`
     pub fn shutdown(&self, _id: SwitchId) {}
 
@@ -473,6 +493,60 @@ impl Switch {
                 .await?,
         )
     }
+
+    async fn start_listener(&self, laddr: Multiaddr) -> Result<()> {
+        let transport = self
+            .transport_of(&laddr)
+            .ok_or_else(|| P2pError::BindMultiAddr(laddr.clone()))?;
+
+        let listener = cancelable_would_block(|cx| transport.bind(cx, &laddr)).await?;
+
+        let this = self.clone();
+
+        spawn(async move {
+            match this.run_listener_loop(transport, listener).await {
+                Ok(_) => log::info!("listener {:?}, stopped", laddr),
+                Err(err) => log::error!("listener {:?}, stopped with error: {}", laddr, err),
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn run_listener_loop(
+        &self,
+        transport: Arc<Box<dyn Transport>>,
+        listener: Handle,
+    ) -> Result<()> {
+        loop {
+            let newly_conn = cancelable_would_block(|cx| transport.accept(cx, &listener)).await?;
+
+            let this = self.clone();
+
+            let transport = transport.clone();
+            spawn(async move {
+                match this.run_incoming_handshake(transport, newly_conn).await {
+                    Ok(_) => log::trace!("succcesfully update incoming connection."),
+                    Err(err) => log::trace!("update incoming connection with error: {}", err),
+                }
+            });
+        }
+    }
+
+    async fn run_incoming_handshake(
+        &self,
+        transport: Arc<Box<dyn Transport>>,
+        newly_conn: Handle,
+    ) -> Result<()> {
+        let self.upgrade(newly_conn, transport).await?;
+        // let stream = SwitchStream {
+        //     peer_id,
+        //     protocol_id: protocol.try_into()?,
+        //     negotiated_handle,
+        // };
+
+        todo!()
+    }
 }
 
 /// A builder pattern implementation for [`Switch`] type.
@@ -485,6 +559,7 @@ pub struct SwitchBuilder {
     muxing: Option<Box<dyn Multiplexing>>,
     secure_upgrade: Option<Box<dyn SecureUpgrade>>,
     neigbhors: Option<Box<dyn Neighbors>>,
+    laddrs: Vec<Multiaddr>,
 }
 
 impl SwitchBuilder {
@@ -512,9 +587,19 @@ impl SwitchBuilder {
         self
     }
 
+    /// Set the switch's listener binding addresses.
+    pub fn bind<A>(mut self, local_addrs: A) -> Self
+    where
+        A: IntoIterator<Item = Multiaddr>,
+    {
+        self.laddrs = local_addrs.into_iter().collect::<Vec<_>>();
+
+        self
+    }
+
     /// Consume the `builder` and generate a new [`Switch`] instance.
-    pub fn create(self) -> Switch {
-        Switch {
+    pub async fn create(self) -> Result<Switch> {
+        let switch = Switch {
             immutable: Arc::new(SwitchImmutable {
                 keypair: self.keypair_manager,
                 transports: self.transports,
@@ -532,6 +617,16 @@ impl SwitchBuilder {
             event_map: Default::default(),
             mutable: Default::default(),
             mux_pool: Default::default(),
+        };
+
+        if self.laddrs.is_empty() {
+            log::warn!("Switch created without bind any listener.");
         }
+
+        for laddr in self.laddrs {
+            switch.start_listener(laddr).await?;
+        }
+
+        Ok(switch)
     }
 }
