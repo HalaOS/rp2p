@@ -1,8 +1,13 @@
 use std::{io, net::Shutdown, sync::Arc, task::Context};
 
+use futures::Future;
 use identity::PeerId;
 use multiaddr::Multiaddr;
-use rasi::syscall::{CancelablePoll, Handle};
+use rasi::{
+    executor::spawn,
+    syscall::{CancelablePoll, Handle},
+    utils::cancelable_would_block,
+};
 
 use crate::errors::Result;
 
@@ -32,7 +37,7 @@ pub trait IO {
         buf: &mut [u8],
     ) -> CancelablePoll<io::Result<usize>>;
 
-    /// Shuts down the read, write, or both halves of the connection referenced by the [`handle`].
+    /// Shuts down the read, write, or both halves of the connection referenced by the [`handle`](Handle).
     ///
     /// This method will cause all pending and future I/O on the specified portions to return
     /// immediately with an appropriate value (see the documentation of [`Shutdown`]).
@@ -86,13 +91,48 @@ pub trait Transport: DebugOfHandle + IO + Sync + Send {
 
 pub trait SecureUpgrade: DebugOfHandle + IO + Upgrade + Sync + Send {}
 
-/// A type that upgrade one [`SwitchConn`] to support creating muxing bi-directional data stream.
+/// A type that upgrade the [`P2pConn`] to support creating muxing bi-directional data stream.
 pub trait MuxingUpgrade: DebugOfHandle + IO + Upgrade + Sync + Send {
     /// Accept a newly incoming muxing stream.
     fn accept(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
 
     /// Create a newly outbound muxing stream.
     fn connect(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
+}
+
+/// Neighbors is a set of libp2p peers, that can be directly connected by switch.
+///
+/// This trait provides a set of functions to get/update/delete the peer's route information in the `Neighbors`.
+pub trait Neighbors: Sync + Send {
+    /// manually update a route for the neighbor peer by [`id`](PeerId).
+    fn neighbors_put(
+        &self,
+        cx: &mut Context<'_>,
+        peer_id: PeerId,
+        raddrs: &[Multiaddr],
+    ) -> CancelablePoll<io::Result<()>>;
+
+    /// Returns a copy of route table of one neighbor peer by [`id`](PeerId).
+    fn neighbors_get(
+        &self,
+        cx: &mut Context<'_>,
+        peer_id: &PeerId,
+    ) -> CancelablePoll<io::Result<Vec<Multiaddr>>>;
+
+    /// remove some route information from neighbor peer by [`id`](PeerId).
+    fn neighbors_delete(
+        &self,
+        cx: &mut Context<'_>,
+        peer_id: &PeerId,
+        raddrs: &[Multiaddr],
+    ) -> CancelablePoll<io::Result<()>>;
+
+    /// Completely, remove the route table of one neighbor peer by [`id`](PeerId).
+    fn neighbors_delete_all(
+        &self,
+        cx: &mut Context<'_>,
+        peer_id: &PeerId,
+    ) -> CancelablePoll<io::Result<()>>;
 }
 
 /// Transport specified upgrade workflow
@@ -155,44 +195,69 @@ impl Upgrader {
     }
 }
 
-///  A channel is a bi-directional network channel maintained by a [`Switch`]
+///  A channel is a bi-directional network channel maintained by a [`Switch`](super::Switch)
 #[derive(Clone)]
 pub struct Channel {
     pub(super) transport: Arc<Box<dyn Transport>>,
     pub(super) upgrader: Upgrader,
 }
 
-/// Neighbors is a set of libp2p peers, that can be directly connected by switch.
-///
-/// This trait provides a set of functions to get/update/delete the peer's route information in the `Neighbors`.
-pub trait Neighbors: Sync + Send {
-    /// manually update a route for the neighbor peer by [`id`](PeerId).
-    fn neighbors_put(
-        &self,
-        cx: &mut Context<'_>,
-        peer_id: PeerId,
-        raddrs: &[Multiaddr],
-    ) -> CancelablePoll<io::Result<()>>;
+impl<T, S, M> From<(T, S, M)> for Channel
+where
+    T: Transport + 'static,
+    S: SecureUpgrade + 'static,
+    M: MuxingUpgrade + 'static,
+{
+    fn from((t, s, m): (T, S, M)) -> Self {
+        Self {
+            transport: Arc::new(Box::new(t)),
+            upgrader: Upgrader::new(s, m),
+        }
+    }
+}
 
-    /// Returns a copy of route table of one neighbor peer by [`id`](PeerId).
-    fn neighbors_get(
+impl Channel {
+    /// Accept newly incoming connection, and upgrade transport connection to [`P2pConn`].
+    pub async fn accept<H, Fut>(
         &self,
-        cx: &mut Context<'_>,
-        peer_id: &PeerId,
-    ) -> CancelablePoll<io::Result<Vec<Multiaddr>>>;
+        listener: &Handle,
+        keypair: Arc<Box<dyn KeyPair>>,
+        handler: H,
+    ) -> Result<()>
+    where
+        H: FnOnce(Result<P2pConn>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send,
+    {
+        let conn_handle = cancelable_would_block(|cx| self.transport.accept(cx, listener)).await?;
 
-    /// remove some route information from neighbor peer by [`id`](PeerId).
-    fn neighbors_delete(
-        &self,
-        cx: &mut Context<'_>,
-        peer_id: &PeerId,
-        raddrs: &[Multiaddr],
-    ) -> CancelablePoll<io::Result<()>>;
+        let transport = self.transport.clone();
+        let upgrader = self.upgrader.clone();
 
-    /// Completely, remove the route table of one neighbor peer by [`id`](PeerId).
-    fn neighbors_delete_all(
+        spawn(async move {
+            handler(
+                upgrader
+                    .server_conn_upgrade(conn_handle, transport.clone(), keypair)
+                    .await,
+            )
+            .await;
+        });
+
+        Ok(())
+    }
+
+    /// Create a transport connection that connected to `raddr`, and upgrade it to [`P2pConn`].
+    pub async fn connect(
         &self,
-        cx: &mut Context<'_>,
-        peer_id: &PeerId,
-    ) -> CancelablePoll<io::Result<()>>;
+        raddr: &Multiaddr,
+        keypair: Arc<Box<dyn KeyPair>>,
+    ) -> Result<P2pConn> {
+        let conn_handle = cancelable_would_block(|cx: &mut Context<'_>| {
+            self.transport.connect(cx, raddr, keypair.clone())
+        })
+        .await?;
+
+        self.upgrader
+            .client_conn_upgrade(conn_handle, self.transport.clone(), keypair)
+            .await
+    }
 }

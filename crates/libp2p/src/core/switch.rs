@@ -11,10 +11,7 @@ use rasi_ext::{
     utils::{AsyncLockable, AsyncSpinMutex},
 };
 
-use crate::{
-    core::run_identity_protocol_once,
-    errors::{P2pError, Result},
-};
+use crate::errors::{P2pError, Result};
 
 use super::{
     Channel, ConnPoolOfPeers, DefaultKeyPair, DefaultNeighbors, KeyPair, Neighbors, P2pConn,
@@ -62,37 +59,22 @@ struct MutableSwitch {
 #[derive(Clone)]
 pub struct Switch {
     immutable_switch: Arc<ImmutableSwitch>,
-    mutable: Arc<AsyncSpinMutex<MutableSwitch>>,
+    mutable_switch: Arc<AsyncSpinMutex<MutableSwitch>>,
     event_map: Arc<EventMap<SwitchEvent>>,
     conn_pool_of_peers: Arc<ConnPoolOfPeers>,
 }
 
 impl Switch {
-    /// Create new connection to `raddrs`.
-    pub async fn connect(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
+    async fn connect_inner(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
         let mut last_error = None;
         for raddr in raddrs {
             if let Some(channel) = self.immutable_switch.channel_of_multiaddr(&raddr) {
-                match cancelable_would_block(|cx| {
-                    channel
-                        .transport
-                        .connect(cx, raddr, self.immutable_switch.keypair.clone())
-                })
-                .await
+                match channel
+                    .connect(raddr, self.immutable_switch.keypair.clone())
+                    .await
                 {
                     Ok(conn) => {
-                        match channel
-                            .upgrader
-                            .client_conn_upgrade(
-                                conn,
-                                channel.transport.clone(),
-                                self.immutable_switch.keypair.clone(),
-                            )
-                            .await
-                        {
-                            Ok(conn) => return Ok(conn),
-                            Err(err) => last_error = Some(err),
-                        }
+                        return Ok(conn);
                     }
                     Err(err) => last_error = Some(err.into()),
                 }
@@ -106,6 +88,17 @@ impl Switch {
         }
     }
 
+    /// Create new connection to `raddrs`.
+    pub async fn connect(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
+        let p2p_conn = self.connect_inner(raddrs).await?;
+
+        let p2p_conn = p2p_conn.negotiate_peer_id(self.clone()).await?;
+
+        self.conn_pool_of_peers.put(p2p_conn.clone()).await;
+
+        Ok(p2p_conn)
+    }
+
     /// Open one outbound stream to `peer_id`.
     ///
     /// This function will call [`connect`](Self::connect) to create a new connection,
@@ -113,26 +106,13 @@ impl Switch {
     ///
     /// Returns [`NeighborRoutePathNotFound`](P2pError::NeighborRoutePathNotFound), if this `peer_id` has no routing information.
     pub async fn open_stream(&self, peer_id: &PeerId, protos: &[ProtocolId]) -> Result<P2pStream> {
-        let switch_conn = if let Some(switch_conn) = self.conn_pool_of_peers.get(peer_id).await {
-            switch_conn
+        let p2p_conn = if let Some(p2p_conn) = self.conn_pool_of_peers.get(peer_id).await {
+            p2p_conn
         } else {
-            let switch_conn = self.connect(&self.neighbors_get(peer_id).await?).await?;
-
-            let real_peer_id =
-                run_identity_protocol_once(self.clone(), switch_conn.clone()).await?;
-
-            if real_peer_id != *peer_id {
-                return Err(P2pError::UnexpectPeerId);
-            }
-
-            self.conn_pool_of_peers
-                .put(peer_id, switch_conn.clone())
-                .await;
-
-            switch_conn
+            self.connect(&self.neighbors_get(peer_id).await?).await?
         };
 
-        let stream = switch_conn.open().await?;
+        let stream = p2p_conn.open().await?;
 
         let (negotiated_stream, protocol_id) = stream.client_select_protocol(protos).await?;
 
@@ -143,7 +123,7 @@ impl Switch {
     ///
     /// On success, returns tuple `(Stream,ProtocolId,PeerId)`
     pub async fn accept(&self) -> Option<P2pStream> {
-        let mut mutable = self.mutable.lock().await;
+        let mut mutable = self.mutable_switch.lock().await;
 
         loop {
             if let Some(incoming) = mutable.incoming.pop_front() {
@@ -159,7 +139,7 @@ impl Switch {
                 }
                 _ => {
                     // relock the mutable state again.
-                    mutable = self.mutable.lock().await;
+                    mutable = self.mutable_switch.lock().await;
                 }
             }
         }
@@ -221,7 +201,7 @@ impl Switch {
         let this = self.clone();
 
         spawn(async move {
-            match this.run_listener_loop(channel, handle).await {
+            match this.run_listener_loop(channel, handle, laddr.clone()).await {
                 Ok(_) => log::info!("listener {:?}, stopped", laddr),
                 Err(err) => log::error!("listener {:?}, stopped with error: {}", laddr, err),
             }
@@ -230,51 +210,79 @@ impl Switch {
         Ok(())
     }
 
-    async fn run_listener_loop(&self, channel: Channel, listener: Handle) -> Result<()> {
+    async fn run_listener_loop(
+        &self,
+        channel: Channel,
+        listener: Handle,
+        laddr: Multiaddr,
+    ) -> Result<()> {
         loop {
-            let newly_conn =
-                cancelable_would_block(|cx| channel.transport.accept(cx, &listener)).await?;
-
             let this = self.clone();
+            let laddr = laddr.clone();
 
-            let channel = channel.clone();
-            spawn(async move {
-                match this.run_incoming_handshake(channel, newly_conn).await {
-                    Ok(_) => log::trace!("succcesfully update incoming connection."),
-                    Err(err) => log::trace!("update incoming connection with error: {}", err),
-                }
-            });
+            channel
+                .accept(
+                    &listener,
+                    self.immutable_switch.keypair.clone(),
+                    |newly_conn| {
+                        let this = this;
+
+                        async move {
+                            if let Err(err) = newly_conn {
+                                log::error!(
+                                    "{}, Accept new incoming connection with error: {}",
+                                    laddr,
+                                    err
+                                );
+                                return;
+                            }
+
+                            let newly_conn = newly_conn.unwrap();
+
+                            match this.run_incoming_handshake(newly_conn).await {
+                                Ok(_) => log::trace!("succcesfully update incoming connection."),
+                                Err(err) => {
+                                    log::trace!("update incoming connection with error: {}", err)
+                                }
+                            }
+                        }
+                    },
+                )
+                .await?;
         }
     }
 
-    async fn run_incoming_handshake(&self, channel: Channel, newly_conn: Handle) -> Result<()> {
-        let switch_conn = channel
-            .upgrader
-            .server_conn_upgrade(
-                newly_conn,
-                channel.transport.clone(),
-                self.immutable_switch.keypair.clone(),
-            )
-            .await?;
+    async fn run_incoming_handshake(&self, p2p_conn: P2pConn) -> Result<()> {
+        // fetch peer's id.
+        let p2p_conn = p2p_conn.negotiate_peer_id(self.clone()).await?;
 
-        let peer_id = run_identity_protocol_once(self.clone(), switch_conn.clone()).await?;
+        // put the newly connection into peer pool.
+        self.conn_pool_of_peers.put(p2p_conn.clone()).await;
 
-        while let Some(stream) = switch_conn.accept().await {
-            match stream
-                .server_select_protocol(&self.immutable_switch.protos)
-                .await
-            {
-                Ok((stream, protocol_id)) => {
-                    self.mutable
-                        .lock()
-                        .await
-                        .incoming
-                        .push_back((peer_id, protocol_id, stream).into());
-                }
-                Err(err) => {
-                    log::warn!("negotiation with client cause an error: {}", err);
-                }
-            };
+        while let Some(stream) = p2p_conn.accept().await {
+            let immutable_switch = self.immutable_switch.clone();
+            let mutable_switch = self.mutable_switch.clone();
+
+            // Safety: p2p_conn is identity negotiated.
+            let peer_id = p2p_conn.peer_id().map(Clone::clone).unwrap();
+
+            spawn(async move {
+                match stream
+                    .server_select_protocol(&immutable_switch.protos)
+                    .await
+                {
+                    Ok((stream, protocol_id)) => {
+                        mutable_switch
+                            .lock()
+                            .await
+                            .incoming
+                            .push_back((peer_id, protocol_id, stream).into());
+                    }
+                    Err(err) => {
+                        log::warn!("negotiation with client cause an error: {}", err);
+                    }
+                };
+            });
         }
 
         Ok(())
@@ -282,8 +290,6 @@ impl Switch {
 }
 
 /// A builder pattern implementation for [`Switch`] type.
-///
-/// You can create a `builder` using the [`new`](Switch::new) function.
 #[derive(Default)]
 pub struct SwitchBuilder {
     keypair: Option<Box<dyn KeyPair>>,
@@ -365,7 +371,7 @@ impl SwitchBuilder {
             }),
 
             event_map: Default::default(),
-            mutable: Default::default(),
+            mutable_switch: Default::default(),
             conn_pool_of_peers: Default::default(),
         };
 

@@ -2,7 +2,7 @@ use std::{
     fmt::Debug,
     io,
     net::Shutdown,
-    ops::{Deref, DerefMut},
+    pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -15,9 +15,11 @@ use rasi::{
     utils::cancelable_would_block,
 };
 
-use crate::errors::Result;
+use crate::{errors::Result, Switch};
 
-use super::{KeyPair, MuxingUpgrade, ProtocolId, SecureUpgrade, Transport};
+use super::{
+    run_identity_protocol_once, KeyPair, MuxingUpgrade, ProtocolId, SecureUpgrade, Transport,
+};
 
 /// Inner varaint type of [`SwitchConn`]
 #[derive(Clone)]
@@ -34,10 +36,13 @@ enum SwitchConnType {
 
 /// A variant type of switch connections, that can be created by two way:
 ///
-/// - A `Transport` service, user may call the [`connect`] function or the [`accept`] function to create the native transport connection.
-/// - A `XxxUpgrade` service, user may call the [`upgrade_client`] function or the [`upgrade_server`] function to create the upgraded connection.
+/// - A `Transport` service, user may call the [`connect`](super::Transport::connect) function or the [`accept`](super::Transport::accept)
+/// function to create the native transport connection.
+/// - A `XxxUpgrade` service, user may call the [`upgrade_client`](super::Upgrade::upgrade_client) function or
+/// the [`upgrade_server`](super::Upgrade::upgrade_server) function to create the upgraded connection.
 pub struct P2pConn {
     variant: SwitchConnType,
+    peer_id: Option<PeerId>,
     read_cancel_handle: Option<Handle>,
     write_cancel_handle: Option<Handle>,
 }
@@ -46,6 +51,7 @@ impl Clone for P2pConn {
     fn clone(&self) -> Self {
         Self {
             variant: self.variant.clone(),
+            peer_id: self.peer_id.clone(),
             // Safety: only meaningful in the context of a poll loop.
             read_cancel_handle: None,
             // Safety: only meaningful in the context of a poll loop.
@@ -58,6 +64,7 @@ impl From<(Handle, Arc<Box<dyn Transport>>)> for P2pConn {
     fn from((handle, service): (Handle, Arc<Box<dyn Transport>>)) -> Self {
         Self {
             variant: SwitchConnType::Transport(Arc::new(handle), service),
+            peer_id: None,
             read_cancel_handle: None,
             write_cancel_handle: None,
         }
@@ -68,6 +75,7 @@ impl From<(Handle, Arc<Box<dyn SecureUpgrade>>)> for P2pConn {
     fn from((handle, service): (Handle, Arc<Box<dyn SecureUpgrade>>)) -> Self {
         Self {
             variant: SwitchConnType::SecureUpgrade(Arc::new(handle), service),
+            peer_id: None,
             read_cancel_handle: None,
             write_cancel_handle: None,
         }
@@ -77,6 +85,7 @@ impl From<(Handle, Arc<Box<dyn MuxingUpgrade>>)> for P2pConn {
     fn from((handle, service): (Handle, Arc<Box<dyn MuxingUpgrade>>)) -> Self {
         Self {
             variant: SwitchConnType::MuxingUpgrade(Arc::new(handle), service),
+            peer_id: None,
             read_cancel_handle: None,
             write_cancel_handle: None,
         }
@@ -187,6 +196,17 @@ impl P2pConn {
             SwitchConnType::MuxingUpgrade(handle, _) => handle.clone(),
         }
     }
+
+    /// Test if this p2p connection is peer id negotiated
+    pub fn is_negotiated(&self) -> bool {
+        self.peer_id.is_some()
+    }
+
+    /// Returns peer id of this p2p connection.
+    pub fn peer_id(&self) -> Option<&PeerId> {
+        self.peer_id.as_ref()
+    }
+
     /// Test if this `SwitchConn` is a transport native connection.
     pub fn is_transport_conn(&self) -> bool {
         if let SwitchConnType::Transport(_, _) = self.variant {
@@ -267,7 +287,7 @@ impl P2pConn {
     }
 
     /// Accept new incoming muxing stream via the `MuxingUpgrade` connection.
-    pub async fn accept(&self) -> Option<SwitchStream> {
+    pub(super) async fn accept(&self) -> Option<SwitchStream> {
         match &self.variant {
             SwitchConnType::MuxingUpgrade(handle, service) => {
                 match cancelable_would_block(|cx| service.accept(cx, handle)).await {
@@ -287,7 +307,7 @@ impl P2pConn {
     }
 
     /// Open a outgoing muxing stream via the `MuxingUpgrade` connection.
-    pub async fn open(&self) -> Result<SwitchStream> {
+    pub(super) async fn open(&self) -> Result<SwitchStream> {
         match &self.variant {
             SwitchConnType::MuxingUpgrade(handle, service) => {
                 match cancelable_would_block(|cx| service.connect(cx, handle)).await {
@@ -304,10 +324,24 @@ impl P2pConn {
             }
         }
     }
+
+    /// Start a identity negotiation process, and convert self into negotiated status connection.
+    pub async fn negotiate_peer_id(mut self, switch: Switch) -> Result<Self> {
+        assert!(
+            self.is_mux_upgraded_conn(),
+            "Only MuxingUpgrade connection can call negotiate_peer_id"
+        );
+
+        let peer_id = run_identity_protocol_once(switch, self.clone()).await?;
+
+        self.peer_id = Some(peer_id);
+
+        Ok(self)
+    }
 }
 
 /// A raw data stream, that the protocol is not yet negotiated.
-pub struct SwitchStream {
+pub(super) struct SwitchStream {
     /// The connection to which this stream belongs
     conn: P2pConn,
 
@@ -432,7 +466,7 @@ impl AsyncWrite for SwitchStream {
     }
 }
 
-/// A wrapper for negotiated [`SwitchStream`].
+/// A p2p stream type that the protocol has been negotiated.
 pub struct P2pStream {
     peer_id: PeerId,
     protocol_id: ProtocolId,
@@ -449,16 +483,37 @@ impl From<(PeerId, ProtocolId, Negotiated<SwitchStream>)> for P2pStream {
     }
 }
 
-impl Deref for P2pStream {
-    type Target = Negotiated<SwitchStream>;
-    fn deref(&self) -> &Self::Target {
-        &self.negotiated_stream
+impl AsyncRead for P2pStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        Pin::new(&mut self.negotiated_stream).poll_read(cx, buf)
     }
 }
 
-impl DerefMut for P2pStream {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.negotiated_stream
+impl AsyncWrite for P2pStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        Pin::new(&mut self.negotiated_stream).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Pin::new(&mut self.negotiated_stream).poll_flush(cx)
+    }
+
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Pin::new(&mut self.negotiated_stream).poll_close(cx)
     }
 }
 

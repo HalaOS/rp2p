@@ -13,8 +13,12 @@ pub struct ConnPoolOfPeers {
 }
 
 impl ConnPoolOfPeers {
-    /// Put a [`SwitchConn`] into peer's pool
-    pub async fn put(&self, peer_id: &PeerId, conn: P2pConn) {
+    /// Put a [`P2pConn`] into peer's pool
+    pub async fn put(&self, conn: P2pConn) {
+        let peer_id = conn
+            .peer_id()
+            .expect("Only negotiated connection can be put int peer pool");
+
         let mut pools = self.pools.lock().await;
 
         if let Some(peer_pool) = pools.get_mut(peer_id) {
