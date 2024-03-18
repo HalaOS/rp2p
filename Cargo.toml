@@ -13,14 +13,10 @@ rasi-ext = { path = "rasi/crates/ext", version = "^0.1" }
 rasi-default = { path = "rasi/crates/default", version = "^0.1" }
 rasi-syscall = { path = "rasi/crates/syscall", version = "^0.1" }
 rasi-spec = { path = "rasi/crates/spec", version = "^0.1" }
-
-
 log = { version = "^0.4" }
 pretty_env_logger = "^0.5"
-
-
 # rasi deps
-futures = { version = "^0.3", default-features = false}
+futures = { version = "^0.3", default-features = false }
 bitmask-enum = "^2.2"
 boring = "^4.4.0"
 quiche = { version = "^0.20.0", features = ["boringssl-boring-crate"] }
@@ -39,12 +35,14 @@ thiserror = "1.0.57"
 windows-sys = "^0.52"
 http = "^1.0"
 httparse = "^1.8"
-serde = {version = "^1.0", features = ["derive"]}
-serde_json = {version = "^1.0"}
-
-
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = { version = "^1.0" }
 # libp2p
 multiaddr = "^0.18"
-identity = {version = "^0.2", package = "libp2p-identity"}
+identity = { version = "^0.2", package = "libp2p-identity" }
 semver = "^1.0"
 multistream-select = "^0.13"
+# protobuf
+protobuf-codegen = "3.4.0"
+protoc-bin-vendored = "3.0.0"
+protobuf = "3.4.0"

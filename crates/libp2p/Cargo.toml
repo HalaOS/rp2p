@@ -11,7 +11,7 @@ readme = "../../README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 multiaddr = { workspace = true }
-identity = { workspace = true }
+identity = { workspace = true, features = ["ed25519", "rand"] }
 semver = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -22,7 +22,22 @@ rand = { workspace = true }
 rasi = { workspace = true }
 rasi-ext = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
+protobuf = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }
 pretty_env_logger = { workspace = true }
+
+[build-dependencies]
+protobuf-codegen = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
+[features]
+kad = []
+circuit = []
+keypair = []
+neighbors = []
+tcp = []
+tls = []
+yamux = []
+quic = []

@@ -1,11 +1,19 @@
 use std::{borrow::Cow, fmt::Display};
 
-use identity::PeerId;
+use futures::{AsyncReadExt, AsyncWriteExt};
+use identity::{PeerId, PublicKey};
+use multiaddr::Multiaddr;
+use multistream_select::Negotiated;
+use protobuf::Message;
+use rasi_ext::utils::ReadBuf;
 use semver::Version;
 
-use crate::errors::{P2pError, Result};
+use crate::{
+    errors::{P2pError, Result},
+    proto::identify::Identify,
+};
 
-use super::{P2pConn, Switch};
+use super::{P2pConn, Switch, SwitchStream};
 
 /// The protocol id type for libp2p protocols.
 ///
@@ -115,7 +123,76 @@ impl ProtocolId {
     }
 }
 
+pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<PeerId> {
+    let identify = {
+        let stream = conn.open().await?;
+
+        let (mut stream, _) = stream
+            .client_select_protocol(&["/ipfs/id/1.0.0".try_into().unwrap()])
+            .await?;
+
+        let mut buf = ReadBuf::with_capacity(switch.immutable_switch.max_identity_packet_len);
+
+        loop {
+            let read_size = stream.read(buf.chunk_mut()).await?;
+
+            if read_size == 0 {
+                break;
+            }
+
+            buf.advance_mut(read_size);
+        }
+
+        Identify::parse_from_bytes(buf.chunk())?
+    };
+
+    let conn_peer_id = conn
+        .public_key()
+        .expect("Upgraded connection must has pubkey.")
+        .to_peer_id();
+
+    let pubkey = PublicKey::try_decode_protobuf(identify.publicKey())?;
+
+    let peer_id = pubkey.to_peer_id();
+
+    if conn_peer_id != peer_id {
+        return Err(P2pError::UnexpectPeerId);
+    }
+
+    let raddrs = identify
+        .listenAddrs
+        .into_iter()
+        .map(|buf| Multiaddr::try_from(buf).map_err(Into::into))
+        .collect::<Result<Vec<_>>>()?;
+
+    switch.neighbors_put(peer_id, &raddrs).await?;
+
+    Ok(peer_id)
+}
+
 #[allow(unused)]
-pub async fn run_identity_protocol_once(switch: Switch, conn: P2pConn) -> Result<PeerId> {
-    todo!()
+pub(super) async fn identity_response(
+    switch: &Switch,
+    stream: &mut Negotiated<SwitchStream>,
+    raddr: Multiaddr,
+) -> Result<()> {
+    let mut identity = Identify::new();
+
+    identity.set_observedAddr(raddr.to_vec());
+
+    identity.set_publicKey(switch.public_key().encode_protobuf());
+
+    identity.set_agentVersion(switch.agent_version().to_owned());
+
+    identity.listenAddrs = switch
+        .local_addrs()
+        .iter()
+        .map(|addr| addr.to_vec())
+        .collect::<Vec<_>>();
+
+    let buf = identity.write_to_bytes()?;
+
+    stream.write_all(&buf).await?;
+
+    Ok(())
 }

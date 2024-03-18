@@ -5,17 +5,12 @@ use multiaddr::Multiaddr;
 use rasi::syscall::CancelablePoll;
 use rasi_ext::utils::{Lockable, SpinMutex};
 
-use super::{KeyPair, Neighbors};
+use crate::NeighborStorage;
 
 #[derive(Default)]
-pub struct DefaultKeyPair;
+pub struct MemoryNeighbors(SpinMutex<HashMap<PeerId, HashSet<Multiaddr>>>);
 
-impl KeyPair for DefaultKeyPair {}
-
-#[derive(Default)]
-pub struct DefaultNeighbors(SpinMutex<HashMap<PeerId, HashSet<Multiaddr>>>);
-
-impl Neighbors for DefaultNeighbors {
+impl NeighborStorage for MemoryNeighbors {
     fn neighbors_put(
         &self,
         _cx: &mut std::task::Context<'_>,

@@ -28,6 +28,15 @@ pub enum P2pError {
 
     #[error(transparent)]
     NegotiationErr(#[from] NegotiationError),
+
+    #[error(transparent)]
+    ProtobufErr(#[from] protobuf::Error),
+
+    #[error(transparent)]
+    DecodingErr(#[from] identity::DecodingError),
+
+    #[error(transparent)]
+    MultiaddrErr(#[from] multiaddr::Error),
 }
 
 impl From<P2pError> for io::Error {

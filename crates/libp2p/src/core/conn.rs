@@ -8,7 +8,8 @@ use std::{
 };
 
 use futures::{AsyncRead, AsyncWrite};
-use identity::PeerId;
+use identity::{PeerId, PublicKey};
+use multiaddr::Multiaddr;
 use multistream_select::{dialer_select_proto, listener_select_proto, Negotiated, Version};
 use rasi::{
     syscall::{CancelablePoll, Handle},
@@ -18,7 +19,7 @@ use rasi::{
 use crate::{errors::Result, Switch};
 
 use super::{
-    run_identity_protocol_once, KeyPair, MuxingUpgrade, ProtocolId, SecureUpgrade, Transport,
+    identity_request, KeypairProvider, MuxingUpgrade, ProtocolId, SecureUpgrade, Transport,
 };
 
 /// Inner varaint type of [`SwitchConn`]
@@ -43,6 +44,8 @@ enum SwitchConnType {
 pub struct P2pConn {
     variant: SwitchConnType,
     peer_id: Option<PeerId>,
+    peer_addr: Multiaddr,
+    public_key: Option<PublicKey>,
     read_cancel_handle: Option<Handle>,
     write_cancel_handle: Option<Handle>,
 }
@@ -52,6 +55,8 @@ impl Clone for P2pConn {
         Self {
             variant: self.variant.clone(),
             peer_id: self.peer_id.clone(),
+            peer_addr: self.peer_addr.clone(),
+            public_key: self.public_key.clone(),
             // Safety: only meaningful in the context of a poll loop.
             read_cancel_handle: None,
             // Safety: only meaningful in the context of a poll loop.
@@ -60,32 +65,52 @@ impl Clone for P2pConn {
     }
 }
 
-impl From<(Handle, Arc<Box<dyn Transport>>)> for P2pConn {
-    fn from((handle, service): (Handle, Arc<Box<dyn Transport>>)) -> Self {
+impl From<(Handle, Multiaddr, Arc<Box<dyn Transport>>)> for P2pConn {
+    fn from((handle, peer_addr, service): (Handle, Multiaddr, Arc<Box<dyn Transport>>)) -> Self {
         Self {
             variant: SwitchConnType::Transport(Arc::new(handle), service),
             peer_id: None,
+            public_key: None,
+            peer_addr,
             read_cancel_handle: None,
             write_cancel_handle: None,
         }
     }
 }
 
-impl From<(Handle, Arc<Box<dyn SecureUpgrade>>)> for P2pConn {
-    fn from((handle, service): (Handle, Arc<Box<dyn SecureUpgrade>>)) -> Self {
+impl From<(Handle, Multiaddr, PublicKey, Arc<Box<dyn SecureUpgrade>>)> for P2pConn {
+    fn from(
+        (handle, peer_addr, public_key, service): (
+            Handle,
+            Multiaddr,
+            PublicKey,
+            Arc<Box<dyn SecureUpgrade>>,
+        ),
+    ) -> Self {
         Self {
             variant: SwitchConnType::SecureUpgrade(Arc::new(handle), service),
             peer_id: None,
+            public_key: Some(public_key),
+            peer_addr,
             read_cancel_handle: None,
             write_cancel_handle: None,
         }
     }
 }
-impl From<(Handle, Arc<Box<dyn MuxingUpgrade>>)> for P2pConn {
-    fn from((handle, service): (Handle, Arc<Box<dyn MuxingUpgrade>>)) -> Self {
+impl From<(Handle, Multiaddr, PublicKey, Arc<Box<dyn MuxingUpgrade>>)> for P2pConn {
+    fn from(
+        (handle, peer_addr, public_key, service): (
+            Handle,
+            Multiaddr,
+            PublicKey,
+            Arc<Box<dyn MuxingUpgrade>>,
+        ),
+    ) -> Self {
         Self {
             variant: SwitchConnType::MuxingUpgrade(Arc::new(handle), service),
             peer_id: None,
+            peer_addr,
+            public_key: Some(public_key),
             read_cancel_handle: None,
             write_cancel_handle: None,
         }
@@ -234,56 +259,72 @@ impl P2pConn {
         }
     }
 
+    /// Returns the peer's observed addr.
+    pub fn peer_addr(&self) -> &Multiaddr {
+        &self.peer_addr
+    }
+
     /// Using provided `SecureUpgrade` service, update client connection to support secure channel.
     pub async fn client_secure_upgrade(
         self,
         upgrade: Arc<Box<dyn SecureUpgrade>>,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> io::Result<P2pConn> {
+        let peer_addr = self.peer_addr.clone();
         let upgrade_handle = upgrade.upgrade_client(self, keypair)?;
 
-        cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
+        let public_key =
+            cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
 
-        Ok((upgrade_handle, upgrade).into())
+        Ok((upgrade_handle, peer_addr, public_key, upgrade).into())
     }
 
     /// Using provided `SecureUpgrade` service, update server connection to support secure channel.
     pub async fn server_secure_upgrade(
         self,
         upgrade: Arc<Box<dyn SecureUpgrade>>,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> io::Result<P2pConn> {
+        let peer_addr = self.peer_addr.clone();
+
         let upgrade_handle = upgrade.upgrade_server(self, keypair)?;
 
-        cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
+        let public_key =
+            cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
 
-        Ok((upgrade_handle, upgrade).into())
+        Ok((upgrade_handle, peer_addr, public_key, upgrade).into())
     }
 
     /// Using provided `SecureUpgrade` service, update client connection to support muxing stream.
     pub async fn client_muxing_upgrade(
         self,
         upgrade: Arc<Box<dyn MuxingUpgrade>>,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> io::Result<P2pConn> {
+        let peer_addr = self.peer_addr.clone();
+
         let upgrade_handle = upgrade.upgrade_client(self, keypair)?;
 
-        cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
+        let public_key =
+            cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
 
-        Ok((upgrade_handle, upgrade).into())
+        Ok((upgrade_handle, peer_addr, public_key, upgrade).into())
     }
 
     /// Using provided `SecureUpgrade` service, update server connection to support muxing stream.
     pub async fn server_muxing_upgrade(
         self,
         upgrade: Arc<Box<dyn MuxingUpgrade>>,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> io::Result<P2pConn> {
+        let peer_addr = self.peer_addr.clone();
+
         let upgrade_handle = upgrade.upgrade_server(self, keypair)?;
 
-        cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
+        let public_key =
+            cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
 
-        Ok((upgrade_handle, upgrade).into())
+        Ok((upgrade_handle, peer_addr, public_key, upgrade).into())
     }
 
     /// Accept new incoming muxing stream via the `MuxingUpgrade` connection.
@@ -332,11 +373,16 @@ impl P2pConn {
             "Only MuxingUpgrade connection can call negotiate_peer_id"
         );
 
-        let peer_id = run_identity_protocol_once(switch, self.clone()).await?;
+        let peer_id = identity_request(switch, self.clone()).await?;
 
         self.peer_id = Some(peer_id);
 
         Ok(self)
+    }
+
+    /// Get the peer's public key for encrypting this connection.
+    pub fn public_key(&self) -> Option<&PublicKey> {
+        self.public_key.as_ref()
     }
 }
 
@@ -370,7 +416,10 @@ impl SwitchStream {
         self,
         protocols: &[ProtocolId],
     ) -> Result<(Negotiated<SwitchStream>, ProtocolId)> {
-        let protocols = protocols.iter().map(|id| id.to_string());
+        let protocols = protocols
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
 
         let (id, negotiated) = dialer_select_proto(self, protocols, Version::V1).await?;
 
@@ -382,7 +431,10 @@ impl SwitchStream {
         self,
         protocols: &[ProtocolId],
     ) -> Result<(Negotiated<SwitchStream>, ProtocolId)> {
-        let protocols = protocols.iter().map(|id| id.to_string());
+        let protocols = protocols
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>();
 
         let (id, negotiated) = listener_select_proto(self, protocols).await?;
 

@@ -1,7 +1,7 @@
 use std::{io, net::Shutdown, sync::Arc, task::Context};
 
 use futures::Future;
-use identity::PeerId;
+use identity::{PeerId, PublicKey};
 use multiaddr::Multiaddr;
 use rasi::{
     executor::spawn,
@@ -14,7 +14,9 @@ use crate::errors::Result;
 use super::P2pConn;
 
 /// The service that provide the functions to access the `Switch`'s security keypair.
-pub trait KeyPair: Sync + Send {}
+pub trait KeypairProvider: Sync + Send {
+    fn public_key(&self, cx: &mut Context<'_>) -> CancelablePoll<io::Result<PublicKey>>;
+}
 
 pub trait IO {
     /// Write data via the `connection handle` to peer.
@@ -46,18 +48,24 @@ pub trait IO {
 
 pub trait Upgrade {
     /// Upgrade a client `SwitchConn` to support more features.
-    fn upgrade_client(&self, source: P2pConn, keypair: Arc<Box<dyn KeyPair>>)
-        -> io::Result<Handle>;
+    fn upgrade_client(
+        &self,
+        source: P2pConn,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+    ) -> io::Result<Handle>;
 
     /// Upgrade a server `SwitchConn` to support more features.
-    fn upgrade_server(&self, source: P2pConn, keypair: Arc<Box<dyn KeyPair>>)
-        -> io::Result<Handle>;
+    fn upgrade_server(
+        &self,
+        source: P2pConn,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+    ) -> io::Result<Handle>;
 
     fn handshake(
         &self,
         cx: &mut Context<'_>,
         upgrade_handle: &Handle,
-    ) -> CancelablePoll<io::Result<()>>;
+    ) -> CancelablePoll<io::Result<PublicKey>>;
 }
 
 /// This trait provide the function to fmt handle debug information.
@@ -73,19 +81,23 @@ pub trait Transport: DebugOfHandle + IO + Sync + Send {
     fn bind(
         &self,
         cx: &mut Context<'_>,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
         laddr: &Multiaddr,
     ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Accept a newly incoming transport connection.
-    fn accept(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
+    fn accept(
+        &self,
+        cx: &mut Context<'_>,
+        handle: &Handle,
+    ) -> CancelablePoll<io::Result<(Handle, Multiaddr)>>;
 
     /// Create a transport connection, and connect to `raddr`.
     fn connect(
         &self,
         cx: &mut Context<'_>,
         raddr: &Multiaddr,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> CancelablePoll<io::Result<Handle>>;
 }
 
@@ -103,7 +115,7 @@ pub trait MuxingUpgrade: DebugOfHandle + IO + Upgrade + Sync + Send {
 /// Neighbors is a set of libp2p peers, that can be directly connected by switch.
 ///
 /// This trait provides a set of functions to get/update/delete the peer's route information in the `Neighbors`.
-pub trait Neighbors: Sync + Send {
+pub trait NeighborStorage: Sync + Send {
     /// manually update a route for the neighbor peer by [`id`](PeerId).
     fn neighbors_put(
         &self,
@@ -158,10 +170,11 @@ impl Upgrader {
     pub async fn client_conn_upgrade(
         &self,
         handle: Handle,
+        peer_addr: Multiaddr,
         transport: Arc<Box<dyn Transport>>,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
-        let switch_conn: P2pConn = (handle, transport).into();
+        let switch_conn: P2pConn = (handle, peer_addr, transport).into();
 
         let swithc_conn = switch_conn
             .client_secure_upgrade(self.secure_upgrade.clone(), keypair.clone())
@@ -178,10 +191,11 @@ impl Upgrader {
     pub async fn server_conn_upgrade(
         &self,
         handle: Handle,
+        peer_addr: Multiaddr,
         transport: Arc<Box<dyn Transport>>,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
-        let switch_conn: P2pConn = (handle, transport).into();
+        let switch_conn: P2pConn = (handle, peer_addr, transport).into();
 
         let swithc_conn = switch_conn
             .server_secure_upgrade(self.secure_upgrade.clone(), keypair.clone())
@@ -221,14 +235,15 @@ impl Channel {
     pub async fn accept<H, Fut>(
         &self,
         listener: &Handle,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
         handler: H,
     ) -> Result<()>
     where
         H: FnOnce(Result<P2pConn>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send,
     {
-        let conn_handle = cancelable_would_block(|cx| self.transport.accept(cx, listener)).await?;
+        let (conn_handle, raddr) =
+            cancelable_would_block(|cx| self.transport.accept(cx, listener)).await?;
 
         let transport = self.transport.clone();
         let upgrader = self.upgrader.clone();
@@ -236,7 +251,7 @@ impl Channel {
         spawn(async move {
             handler(
                 upgrader
-                    .server_conn_upgrade(conn_handle, transport.clone(), keypair)
+                    .server_conn_upgrade(conn_handle, raddr, transport.clone(), keypair)
                     .await,
             )
             .await;
@@ -249,7 +264,7 @@ impl Channel {
     pub async fn connect(
         &self,
         raddr: &Multiaddr,
-        keypair: Arc<Box<dyn KeyPair>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
         let conn_handle = cancelable_would_block(|cx: &mut Context<'_>| {
             self.transport.connect(cx, raddr, keypair.clone())
@@ -257,7 +272,7 @@ impl Channel {
         .await?;
 
         self.upgrader
-            .client_conn_upgrade(conn_handle, self.transport.clone(), keypair)
+            .client_conn_upgrade(conn_handle, raddr.clone(), self.transport.clone(), keypair)
             .await
     }
 }
