@@ -5,7 +5,7 @@ use semver::Version;
 
 use crate::errors::{P2pError, Result};
 
-use super::{Switch, SwitchConn};
+use super::{P2pConn, Switch};
 
 /// The protocol id type for libp2p protocols.
 ///
@@ -116,6 +116,6 @@ impl ProtocolId {
 }
 
 #[allow(unused)]
-pub async fn run_identity_protocol_once(switch: Switch, conn: SwitchConn) -> Result<PeerId> {
+pub async fn run_identity_protocol_once(switch: Switch, conn: P2pConn) -> Result<PeerId> {
     todo!()
 }

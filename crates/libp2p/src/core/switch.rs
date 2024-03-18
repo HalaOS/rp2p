@@ -5,7 +5,6 @@ use std::{
 
 use identity::PeerId;
 use multiaddr::Multiaddr;
-use multistream_select::Negotiated;
 use rasi::{executor::spawn, syscall::Handle, utils::cancelable_would_block};
 use rasi_ext::{
     future::event_map::EventMap,
@@ -18,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    Channel, ConnPoolOfPeers, DefaultKeyPair, DefaultNeighbors, KeyPair, Neighbors, ProtocolId,
-    SwitchConn, SwitchStream,
+    Channel, ConnPoolOfPeers, DefaultKeyPair, DefaultNeighbors, KeyPair, Neighbors, P2pConn,
+    P2pStream, ProtocolId,
 };
 
 /// The immutable_switch statement of one [`Switch`]
@@ -56,7 +55,7 @@ enum SwitchEvent {
 #[derive(Default)]
 struct MutableSwitch {
     /// incoming stream fifo queue.
-    incoming: VecDeque<(Negotiated<SwitchStream>, ProtocolId, PeerId)>,
+    incoming: VecDeque<P2pStream>,
 }
 
 /// A switch is the entry point of the libp2p network.
@@ -70,7 +69,7 @@ pub struct Switch {
 
 impl Switch {
     /// Create new connection to `raddrs`.
-    pub async fn connect(&self, raddrs: &[Multiaddr]) -> Result<SwitchConn> {
+    pub async fn connect(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
         let mut last_error = None;
         for raddr in raddrs {
             if let Some(channel) = self.immutable_switch.channel_of_multiaddr(&raddr) {
@@ -107,12 +106,13 @@ impl Switch {
         }
     }
 
-    /// Select one open one new connection to open a protocol stream.
-    pub async fn open_stream(
-        &self,
-        peer_id: &PeerId,
-        protos: &[ProtocolId],
-    ) -> Result<(Negotiated<SwitchStream>, ProtocolId)> {
+    /// Open one outbound stream to `peer_id`.
+    ///
+    /// This function will call [`connect`](Self::connect) to create a new connection,
+    /// if needed(the peer connection pool is empty).
+    ///
+    /// Returns [`NeighborRoutePathNotFound`](P2pError::NeighborRoutePathNotFound), if this `peer_id` has no routing information.
+    pub async fn open_stream(&self, peer_id: &PeerId, protos: &[ProtocolId]) -> Result<P2pStream> {
         let switch_conn = if let Some(switch_conn) = self.conn_pool_of_peers.get(peer_id).await {
             switch_conn
         } else {
@@ -134,13 +134,15 @@ impl Switch {
 
         let stream = switch_conn.open().await?;
 
-        Ok(stream.client_select_protocol(protos).await?)
+        let (negotiated_stream, protocol_id) = stream.client_select_protocol(protos).await?;
+
+        Ok((peer_id.clone(), protocol_id, negotiated_stream).into())
     }
 
     /// Accept a newly inbound stream from `peer`.
     ///
     /// On success, returns tuple `(Stream,ProtocolId,PeerId)`
-    pub async fn accept(&self) -> Option<(Negotiated<SwitchStream>, ProtocolId, PeerId)> {
+    pub async fn accept(&self) -> Option<P2pStream> {
         let mut mutable = self.mutable.lock().await;
 
         loop {
@@ -267,7 +269,7 @@ impl Switch {
                         .lock()
                         .await
                         .incoming
-                        .push_back((stream, protocol_id, peer_id));
+                        .push_back((peer_id, protocol_id, stream).into());
                 }
                 Err(err) => {
                     log::warn!("negotiation with client cause an error: {}", err);
@@ -343,14 +345,11 @@ impl SwitchBuilder {
 
     /// Consume the `builder` and generate a new [`Switch`] instance.
     pub async fn create(self) -> Result<Switch> {
-        let mut protos = ["/ipfs/id/1.0.0"]
+        let protos = ["/ipfs/id/1.0.0"]
             .into_iter()
-            .map(|p| p.try_into().unwrap())
-            .collect::<HashSet<_>>();
-
-        for proto in self.protos {
-            protos.insert(proto?);
-        }
+            .map(|p| p.try_into())
+            .chain(self.protos.into_iter())
+            .collect::<Result<HashSet<_>>>();
 
         let switch = Switch {
             immutable_switch: Arc::new(ImmutableSwitch {
@@ -359,7 +358,7 @@ impl SwitchBuilder {
                         .unwrap_or_else(|| Box::new(DefaultKeyPair::default())),
                 ),
                 channels: self.channels,
-                protos: protos.into_iter().collect::<Vec<_>>(),
+                protos: protos?.into_iter().collect::<Vec<_>>(),
                 neighbors: self
                     .neighbors
                     .unwrap_or_else(|| Box::new(DefaultNeighbors::default())),

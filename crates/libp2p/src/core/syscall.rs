@@ -6,7 +6,7 @@ use rasi::syscall::{CancelablePoll, Handle};
 
 use crate::errors::Result;
 
-use super::SwitchConn;
+use super::P2pConn;
 
 /// The service that provide the functions to access the `Switch`'s security keypair.
 pub trait KeyPair: Sync + Send {}
@@ -41,18 +41,12 @@ pub trait IO {
 
 pub trait Upgrade {
     /// Upgrade a client `SwitchConn` to support more features.
-    fn upgrade_client(
-        &self,
-        source: SwitchConn,
-        keypair: Arc<Box<dyn KeyPair>>,
-    ) -> io::Result<Handle>;
+    fn upgrade_client(&self, source: P2pConn, keypair: Arc<Box<dyn KeyPair>>)
+        -> io::Result<Handle>;
 
     /// Upgrade a server `SwitchConn` to support more features.
-    fn upgrade_server(
-        &self,
-        source: SwitchConn,
-        keypair: Arc<Box<dyn KeyPair>>,
-    ) -> io::Result<Handle>;
+    fn upgrade_server(&self, source: P2pConn, keypair: Arc<Box<dyn KeyPair>>)
+        -> io::Result<Handle>;
 
     fn handshake(
         &self,
@@ -126,8 +120,8 @@ impl Upgrader {
         handle: Handle,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeyPair>>,
-    ) -> Result<SwitchConn> {
-        let switch_conn: SwitchConn = (handle, transport).into();
+    ) -> Result<P2pConn> {
+        let switch_conn: P2pConn = (handle, transport).into();
 
         let swithc_conn = switch_conn
             .client_secure_upgrade(self.secure_upgrade.clone(), keypair.clone())
@@ -146,8 +140,8 @@ impl Upgrader {
         handle: Handle,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeyPair>>,
-    ) -> Result<SwitchConn> {
-        let switch_conn: SwitchConn = (handle, transport).into();
+    ) -> Result<P2pConn> {
+        let switch_conn: P2pConn = (handle, transport).into();
 
         let swithc_conn = switch_conn
             .server_secure_upgrade(self.secure_upgrade.clone(), keypair.clone())

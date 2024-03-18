@@ -2,11 +2,13 @@ use std::{
     fmt::Debug,
     io,
     net::Shutdown,
+    ops::{Deref, DerefMut},
     sync::Arc,
     task::{Context, Poll},
 };
 
 use futures::{AsyncRead, AsyncWrite};
+use identity::PeerId;
 use multistream_select::{dialer_select_proto, listener_select_proto, Negotiated, Version};
 use rasi::{
     syscall::{CancelablePoll, Handle},
@@ -34,13 +36,13 @@ enum SwitchConnType {
 ///
 /// - A `Transport` service, user may call the [`connect`] function or the [`accept`] function to create the native transport connection.
 /// - A `XxxUpgrade` service, user may call the [`upgrade_client`] function or the [`upgrade_server`] function to create the upgraded connection.
-pub struct SwitchConn {
+pub struct P2pConn {
     variant: SwitchConnType,
     read_cancel_handle: Option<Handle>,
     write_cancel_handle: Option<Handle>,
 }
 
-impl Clone for SwitchConn {
+impl Clone for P2pConn {
     fn clone(&self) -> Self {
         Self {
             variant: self.variant.clone(),
@@ -52,7 +54,7 @@ impl Clone for SwitchConn {
     }
 }
 
-impl From<(Handle, Arc<Box<dyn Transport>>)> for SwitchConn {
+impl From<(Handle, Arc<Box<dyn Transport>>)> for P2pConn {
     fn from((handle, service): (Handle, Arc<Box<dyn Transport>>)) -> Self {
         Self {
             variant: SwitchConnType::Transport(Arc::new(handle), service),
@@ -62,7 +64,7 @@ impl From<(Handle, Arc<Box<dyn Transport>>)> for SwitchConn {
     }
 }
 
-impl From<(Handle, Arc<Box<dyn SecureUpgrade>>)> for SwitchConn {
+impl From<(Handle, Arc<Box<dyn SecureUpgrade>>)> for P2pConn {
     fn from((handle, service): (Handle, Arc<Box<dyn SecureUpgrade>>)) -> Self {
         Self {
             variant: SwitchConnType::SecureUpgrade(Arc::new(handle), service),
@@ -71,7 +73,7 @@ impl From<(Handle, Arc<Box<dyn SecureUpgrade>>)> for SwitchConn {
         }
     }
 }
-impl From<(Handle, Arc<Box<dyn MuxingUpgrade>>)> for SwitchConn {
+impl From<(Handle, Arc<Box<dyn MuxingUpgrade>>)> for P2pConn {
     fn from((handle, service): (Handle, Arc<Box<dyn MuxingUpgrade>>)) -> Self {
         Self {
             variant: SwitchConnType::MuxingUpgrade(Arc::new(handle), service),
@@ -81,7 +83,7 @@ impl From<(Handle, Arc<Box<dyn MuxingUpgrade>>)> for SwitchConn {
     }
 }
 
-impl AsyncRead for SwitchConn {
+impl AsyncRead for P2pConn {
     fn poll_read(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -111,7 +113,7 @@ impl AsyncRead for SwitchConn {
     }
 }
 
-impl AsyncWrite for SwitchConn {
+impl AsyncWrite for P2pConn {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -167,7 +169,7 @@ impl AsyncWrite for SwitchConn {
     }
 }
 
-impl Debug for SwitchConn {
+impl Debug for P2pConn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.variant {
             SwitchConnType::Transport(handle, service) => service.fmt_handle(handle, f),
@@ -177,7 +179,7 @@ impl Debug for SwitchConn {
     }
 }
 
-impl SwitchConn {
+impl P2pConn {
     pub fn inner_handle(&self) -> Arc<Handle> {
         match &self.variant {
             SwitchConnType::Transport(handle, _) => handle.clone(),
@@ -217,7 +219,7 @@ impl SwitchConn {
         self,
         upgrade: Arc<Box<dyn SecureUpgrade>>,
         keypair: Arc<Box<dyn KeyPair>>,
-    ) -> io::Result<SwitchConn> {
+    ) -> io::Result<P2pConn> {
         let upgrade_handle = upgrade.upgrade_client(self, keypair)?;
 
         cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
@@ -230,7 +232,7 @@ impl SwitchConn {
         self,
         upgrade: Arc<Box<dyn SecureUpgrade>>,
         keypair: Arc<Box<dyn KeyPair>>,
-    ) -> io::Result<SwitchConn> {
+    ) -> io::Result<P2pConn> {
         let upgrade_handle = upgrade.upgrade_server(self, keypair)?;
 
         cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
@@ -243,7 +245,7 @@ impl SwitchConn {
         self,
         upgrade: Arc<Box<dyn MuxingUpgrade>>,
         keypair: Arc<Box<dyn KeyPair>>,
-    ) -> io::Result<SwitchConn> {
+    ) -> io::Result<P2pConn> {
         let upgrade_handle = upgrade.upgrade_client(self, keypair)?;
 
         cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
@@ -256,7 +258,7 @@ impl SwitchConn {
         self,
         upgrade: Arc<Box<dyn MuxingUpgrade>>,
         keypair: Arc<Box<dyn KeyPair>>,
-    ) -> io::Result<SwitchConn> {
+    ) -> io::Result<P2pConn> {
         let upgrade_handle = upgrade.upgrade_server(self, keypair)?;
 
         cancelable_would_block(|cx| upgrade.handshake(cx, &upgrade_handle)).await?;
@@ -307,7 +309,7 @@ impl SwitchConn {
 /// A raw data stream, that the protocol is not yet negotiated.
 pub struct SwitchStream {
     /// The connection to which this stream belongs
-    conn: SwitchConn,
+    conn: P2pConn,
 
     /// muxing stream handle.5
     stream_handle: Handle,
@@ -320,7 +322,7 @@ pub struct SwitchStream {
 }
 
 impl SwitchStream {
-    fn new(conn: SwitchConn, stream_handle: Handle) -> Self {
+    fn new(conn: P2pConn, stream_handle: Handle) -> Self {
         Self {
             conn,
             stream_handle,
@@ -427,5 +429,47 @@ impl AsyncWrite for SwitchStream {
         }
 
         Poll::Ready(Ok(()))
+    }
+}
+
+/// A wrapper for negotiated [`SwitchStream`].
+pub struct P2pStream {
+    peer_id: PeerId,
+    protocol_id: ProtocolId,
+    negotiated_stream: Negotiated<SwitchStream>,
+}
+
+impl From<(PeerId, ProtocolId, Negotiated<SwitchStream>)> for P2pStream {
+    fn from(value: (PeerId, ProtocolId, Negotiated<SwitchStream>)) -> Self {
+        Self {
+            peer_id: value.0,
+            protocol_id: value.1,
+            negotiated_stream: value.2,
+        }
+    }
+}
+
+impl Deref for P2pStream {
+    type Target = Negotiated<SwitchStream>;
+    fn deref(&self) -> &Self::Target {
+        &self.negotiated_stream
+    }
+}
+
+impl DerefMut for P2pStream {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.negotiated_stream
+    }
+}
+
+impl P2pStream {
+    /// Returns the [`peer id`] for this stream.
+    pub fn peer_id(&self) -> &PeerId {
+        &self.peer_id
+    }
+
+    /// Returns the negotiated [`ProtocolId`] .
+    pub fn protocol_id(&self) -> &ProtocolId {
+        &self.protocol_id
     }
 }

@@ -4,17 +4,17 @@ use identity::PeerId;
 use rand::{seq::IteratorRandom, thread_rng};
 use rasi_ext::utils::{AsyncLockable, AsyncSpinMutex};
 
-use super::SwitchConn;
+use super::P2pConn;
 
 /// The connection pool for peers.
 #[derive(Default)]
 pub struct ConnPoolOfPeers {
-    pools: AsyncSpinMutex<HashMap<PeerId, Vec<SwitchConn>>>,
+    pools: AsyncSpinMutex<HashMap<PeerId, Vec<P2pConn>>>,
 }
 
 impl ConnPoolOfPeers {
     /// Put a [`SwitchConn`] into peer's pool
-    pub async fn put(&self, peer_id: &PeerId, conn: SwitchConn) {
+    pub async fn put(&self, peer_id: &PeerId, conn: P2pConn) {
         let mut pools = self.pools.lock().await;
 
         if let Some(peer_pool) = pools.get_mut(peer_id) {
@@ -27,7 +27,7 @@ impl ConnPoolOfPeers {
     /// Random select one connection from the peer pool.
     ///
     /// Returns [`None`], if there are no active connections.
-    pub async fn get(&self, peer_id: &PeerId) -> Option<SwitchConn> {
+    pub async fn get(&self, peer_id: &PeerId) -> Option<P2pConn> {
         let pools = self.pools.lock().await;
 
         if let Some(peer_pool) = pools.get(&peer_id) {
@@ -40,7 +40,7 @@ impl ConnPoolOfPeers {
         }
     }
 
-    pub async fn delete(&self, peer_id: &PeerId, dropping: &[SwitchConn]) {
+    pub async fn delete(&self, peer_id: &PeerId, dropping: &[P2pConn]) {
         let mut pools = self.pools.lock().await;
 
         if let Some(mut peer_pool) = pools.remove(&peer_id) {
