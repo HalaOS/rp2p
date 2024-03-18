@@ -123,6 +123,7 @@ impl ProtocolId {
     }
 }
 
+/// client-side use this function to execute identify request.
 pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<PeerId> {
     let identify = {
         let stream = conn.open().await?;
@@ -170,7 +171,7 @@ pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<Pe
     Ok(peer_id)
 }
 
-#[allow(unused)]
+/// The responsor of identify request.
 pub(super) async fn identity_response(
     switch: &Switch,
     stream: &mut Negotiated<SwitchStream>,
@@ -195,4 +196,37 @@ pub(super) async fn identity_response(
     stream.write_all(&buf).await?;
 
     Ok(())
+}
+
+/// Handle `/ipfs/id/push/1.0.0` request.
+pub(super) async fn identity_push(
+    switch: &mut Switch,
+    stream: &mut Negotiated<SwitchStream>,
+    peer_id: PeerId,
+) -> Result<PeerId> {
+    let identify = {
+        let mut buf = ReadBuf::with_capacity(switch.immutable_switch.max_identity_packet_len);
+
+        loop {
+            let read_size = stream.read(buf.chunk_mut()).await?;
+
+            if read_size == 0 {
+                break;
+            }
+
+            buf.advance_mut(read_size);
+        }
+
+        Identify::parse_from_bytes(buf.chunk())?
+    };
+
+    let raddrs = identify
+        .listenAddrs
+        .into_iter()
+        .map(|buf| Multiaddr::try_from(buf).map_err(Into::into))
+        .collect::<Result<Vec<_>>>()?;
+
+    switch.neighbors_put(peer_id, &raddrs).await?;
+
+    Ok(peer_id)
 }

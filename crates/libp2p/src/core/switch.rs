@@ -19,8 +19,8 @@ use crate::{
 };
 
 use super::{
-    identity_response, Channel, ConnPoolOfPeers, KeypairProvider, NeighborStorage, P2pConn,
-    P2pStream, ProtocolId, SwitchStream,
+    identity_push, identity_response, Channel, ConnPoolOfPeers, KeypairProvider, NeighborStorage,
+    P2pConn, P2pStream, ProtocolId, SwitchStream,
 };
 
 /// The immutable_switch statement of one [`Switch`]
@@ -322,7 +322,7 @@ impl Switch {
             // Safety: p2p_conn is identity negotiated.
             let peer_id = p2p_conn.peer_id().map(Clone::clone).unwrap();
 
-            let this = self.clone();
+            let mut this = self.clone();
 
             let raddr = p2p_conn.peer_addr().clone();
 
@@ -333,7 +333,12 @@ impl Switch {
                 {
                     Ok((mut stream, protocol_id)) => {
                         match this
-                            .handle_core_protocols(&mut stream, &protocol_id, raddr)
+                            .handle_core_protocols(
+                                &mut stream,
+                                &protocol_id,
+                                raddr,
+                                peer_id.clone(),
+                            )
                             .await
                         {
                             Ok(true) => {
@@ -367,13 +372,20 @@ impl Switch {
     }
 
     async fn handle_core_protocols(
-        &self,
+        &mut self,
         stream: &mut Negotiated<SwitchStream>,
         protocol_id: &ProtocolId,
         raddr: Multiaddr,
+        peer_id: PeerId,
     ) -> Result<bool> {
-        if protocol_id.to_string() == "/ipfs/id/push/1.0.0" {
+        if protocol_id.to_string() == "/ipfs/id/1.0.0" {
             identity_response(self, stream, raddr).await?;
+
+            return Ok(true);
+        }
+
+        if protocol_id.to_string() == "/ipfs/id/push/1.0.0" {
+            identity_push(self, stream, peer_id).await?;
 
             return Ok(true);
         }
