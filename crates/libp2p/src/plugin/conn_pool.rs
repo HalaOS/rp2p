@@ -171,6 +171,11 @@ impl ConnPool for AutoPingConnPool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
     use futures_test::task::noop_context;
     use identity::PeerId;
     use rasi::{poll_cancelable, syscall::CancelablePoll, utils::cancelable_would_block};
@@ -200,11 +205,15 @@ mod tests {
 
         let pending = None;
 
+        let counter = Arc::new(AtomicUsize::new(0));
+
         fn lock(
             pending: Option<rasi::syscall::PendingHandle>,
             mutex: &AsyncSpinMutex<()>,
+            counter: Arc<AtomicUsize>,
         ) -> CancelablePoll<()> {
             poll_cancelable!(Test, &mut noop_context(), pending, || async {
+                counter.fetch_add(1, Ordering::Relaxed);
                 let _ = mutex.lock().await;
             })
         }
@@ -212,15 +221,17 @@ mod tests {
         let pending = {
             let _guard = mutex.lock().await;
 
-            let poll = lock(pending, &mutex);
+            let poll = lock(pending, &mutex, counter.clone());
 
             assert!(poll.is_pending());
 
             poll.into_pending()
         };
 
-        let poll = lock(pending, &mutex);
+        let poll = lock(pending, &mutex, counter.clone());
 
         assert!(poll.is_ready());
+
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 }
