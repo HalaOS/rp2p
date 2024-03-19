@@ -1,6 +1,13 @@
-use std::{io, net::Shutdown, sync::Arc, task::Context};
+use std::{
+    fmt::Debug,
+    io,
+    net::Shutdown,
+    ops::Deref,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
-use futures::Future;
+use futures::{AsyncRead, AsyncWrite, Future};
 use identity::{PeerId, PublicKey};
 use multiaddr::Multiaddr;
 use rasi::{
@@ -18,7 +25,8 @@ pub trait KeypairProvider: Sync + Send {
     fn public_key(&self, cx: &mut Context<'_>) -> CancelablePoll<io::Result<PublicKey>>;
 }
 
-pub trait IO {
+/// A service that provide asynchronous reading/writing functions.
+pub trait ChannelIo: Sync + Send + Unpin {
     /// Write data via the `connection handle` to peer.
     ///
     /// On success, returns the written data length.
@@ -46,34 +54,21 @@ pub trait IO {
     fn shutdown(&self, handle: &Handle, how: Shutdown) -> io::Result<()>;
 }
 
-pub trait Upgrade {
-    /// Upgrade a client `SwitchConn` to support more features.
-    fn upgrade_client(
-        &self,
-        source: P2pConn,
-        keypair: Arc<Box<dyn KeypairProvider>>,
-    ) -> io::Result<Handle>;
+/// A trait provide accessors to handle context informations.
+pub trait HandleContext {
+    /// Format handle with provided [`Formatter`](std::fmt::Formatter).
+    fn fmt(&self, handle: &Handle, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
 
-    /// Upgrade a server `SwitchConn` to support more features.
-    fn upgrade_server(
-        &self,
-        source: P2pConn,
-        keypair: Arc<Box<dyn KeypairProvider>>,
-    ) -> io::Result<Handle>;
+    /// Returns the connection's peer [`Multiaddr`] referenced by this handle.
+    fn peer_addr(&self, handle: &Handle) -> &Multiaddr;
 
-    fn handshake(
-        &self,
-        cx: &mut Context<'_>,
-        upgrade_handle: &Handle,
-    ) -> CancelablePoll<io::Result<PublicKey>>;
+    /// Get the peer [`PublicKey`] used to encrypt the connection referenced by this `handle`.
+    ///
+    /// If the connection lack security, returns None.
+    fn public_key(&self, handle: &Handle) -> Option<&PublicKey>;
 }
 
-/// This trait provide the function to fmt handle debug information.
-pub trait DebugOfHandle {
-    fn fmt_handle(&self, handle: &Handle, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
-}
-
-pub trait Transport: DebugOfHandle + IO + Sync + Send {
+pub trait Transport: HandleContext + ChannelIo + Sync + Send {
     /// Test if this transport exact match the `addr`.
     fn multiaddr_hint(&self, addr: &Multiaddr) -> bool;
 
@@ -101,15 +96,85 @@ pub trait Transport: DebugOfHandle + IO + Sync + Send {
     ) -> CancelablePoll<io::Result<Handle>>;
 }
 
-pub trait SecureUpgrade: DebugOfHandle + IO + Upgrade + Sync + Send {}
+pub trait SecureUpgrade: HandleContext + ChannelIo + Sync + Send {
+    /// Upgrade a client `SwitchConn` to support more features.
+    fn upgrade_client(
+        &self,
+        handle: Handle,
+        transport: Arc<Box<dyn Transport>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+    ) -> io::Result<Handle>;
+
+    /// Upgrade a server `SwitchConn` to support more features.
+    fn upgrade_server(
+        &self,
+        handle: Handle,
+        transport: Arc<Box<dyn Transport>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+    ) -> io::Result<Handle>;
+
+    fn handshake(
+        &self,
+        cx: &mut Context<'_>,
+        upgrade_handle: &Handle,
+    ) -> CancelablePoll<io::Result<PublicKey>>;
+}
 
 /// A type that upgrade the [`P2pConn`] to support creating muxing bi-directional data stream.
-pub trait MuxingUpgrade: DebugOfHandle + IO + Upgrade + Sync + Send {
+pub trait MuxingUpgrade: HandleContext + Sync + Send {
+    /// Upgrade a client `SwitchConn` to support more features.
+    fn upgrade_client(
+        &self,
+        handle: Handle,
+        secure_upgrade: Arc<Box<dyn SecureUpgrade>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+    ) -> io::Result<Handle>;
+
+    /// Upgrade a server `SwitchConn` to support more features.
+    fn upgrade_server(
+        &self,
+        handle: Handle,
+        secure_upgrade: Arc<Box<dyn SecureUpgrade>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+    ) -> io::Result<Handle>;
+
+    fn handshake(
+        &self,
+        cx: &mut Context<'_>,
+        upgrade_handle: &Handle,
+    ) -> CancelablePoll<io::Result<PublicKey>>;
+
     /// Accept a newly incoming muxing stream.
     fn accept(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
 
     /// Create a newly outbound muxing stream.
     fn connect(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
+
+    /// Write data via the `connection handle` to peer.
+    ///
+    /// On success, returns the written data length.
+    fn write(
+        &self,
+        cx: &mut Context<'_>,
+        stream_handle: &Handle,
+        buf: &[u8],
+    ) -> CancelablePoll<io::Result<usize>>;
+
+    /// Read data via the `connection handle` from peer.
+    ///
+    /// On success, returns the read data length.
+    fn read(
+        &self,
+        cx: &mut Context<'_>,
+        stream_handle: &Handle,
+        buf: &mut [u8],
+    ) -> CancelablePoll<io::Result<usize>>;
+
+    /// Shuts down the read, write, or both halves of the connection referenced by the [`handle`](Handle).
+    ///
+    /// This method will cause all pending and future I/O on the specified portions to return
+    /// immediately with an appropriate value (see the documentation of [`Shutdown`]).
+    fn shutdown(&self, stream_handle: &Handle, how: Shutdown) -> io::Result<()>;
 }
 
 /// Neighbors is a set of libp2p peers, that can be directly connected by switch.
@@ -170,42 +235,48 @@ impl Upgrader {
     pub async fn client_conn_upgrade(
         &self,
         handle: Handle,
-        peer_addr: Multiaddr,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
-        let switch_conn: P2pConn = (handle, peer_addr, transport).into();
+        let upgrade_handle =
+            self.secure_upgrade
+                .upgrade_client(handle, transport, keypair.clone())?;
 
-        let swithc_conn = switch_conn
-            .client_secure_upgrade(self.secure_upgrade.clone(), keypair.clone())
-            .await?;
+        cancelable_would_block(|cx| self.secure_upgrade.handshake(cx, &upgrade_handle)).await?;
 
-        let swithc_conn = swithc_conn
-            .client_muxing_upgrade(self.muxing_updrade.clone(), keypair)
-            .await?;
+        let upgrade_handle = self.muxing_updrade.upgrade_client(
+            upgrade_handle,
+            self.secure_upgrade.clone(),
+            keypair.clone(),
+        )?;
 
-        Ok(swithc_conn)
+        cancelable_would_block(|cx| self.muxing_updrade.handshake(cx, &upgrade_handle)).await?;
+
+        Ok((Arc::new(upgrade_handle), self.muxing_updrade.clone()).into())
     }
 
     /// Upgrade a server-side transport connection.
     pub async fn server_conn_upgrade(
         &self,
         handle: Handle,
-        peer_addr: Multiaddr,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
-        let switch_conn: P2pConn = (handle, peer_addr, transport).into();
+        let upgrade_handle =
+            self.secure_upgrade
+                .upgrade_server(handle, transport, keypair.clone())?;
 
-        let swithc_conn = switch_conn
-            .server_secure_upgrade(self.secure_upgrade.clone(), keypair.clone())
-            .await?;
+        cancelable_would_block(|cx| self.secure_upgrade.handshake(cx, &upgrade_handle)).await?;
 
-        let swithc_conn = swithc_conn
-            .server_muxing_upgrade(self.muxing_updrade.clone(), keypair)
-            .await?;
+        let upgrade_handle = self.muxing_updrade.upgrade_server(
+            upgrade_handle,
+            self.secure_upgrade.clone(),
+            keypair.clone(),
+        )?;
 
-        Ok(swithc_conn)
+        cancelable_would_block(|cx| self.muxing_updrade.handshake(cx, &upgrade_handle)).await?;
+
+        Ok((Arc::new(upgrade_handle), self.muxing_updrade.clone()).into())
     }
 }
 
@@ -242,7 +313,7 @@ impl Channel {
         H: FnOnce(Result<P2pConn>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send,
     {
-        let (conn_handle, raddr) =
+        let (conn_handle, _) =
             cancelable_would_block(|cx| self.transport.accept(cx, listener)).await?;
 
         let transport = self.transport.clone();
@@ -251,7 +322,7 @@ impl Channel {
         spawn(async move {
             handler(
                 upgrader
-                    .server_conn_upgrade(conn_handle, raddr, transport.clone(), keypair)
+                    .server_conn_upgrade(conn_handle, transport.clone(), keypair)
                     .await,
             )
             .await;
@@ -272,7 +343,114 @@ impl Channel {
         .await?;
 
         self.upgrader
-            .client_conn_upgrade(conn_handle, raddr.clone(), self.transport.clone(), keypair)
+            .client_conn_upgrade(conn_handle, self.transport.clone(), keypair)
             .await
+    }
+}
+
+/// A varaint handle type of p2p connections .
+pub struct SwitchConn<C> {
+    pub(super) handle: Arc<Handle>,
+    pub(super) channel: Arc<C>,
+    write_cancel_handle: Option<Handle>,
+    read_cancel_handle: Option<Handle>,
+}
+
+impl<C> From<(Arc<Handle>, Arc<C>)> for SwitchConn<C> {
+    fn from(value: (Arc<Handle>, Arc<C>)) -> Self {
+        Self {
+            handle: value.0,
+            channel: value.1,
+            write_cancel_handle: None,
+            read_cancel_handle: None,
+        }
+    }
+}
+
+impl<C> Debug for SwitchConn<C>
+where
+    C: Deref,
+    C::Target: HandleContext,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.channel.fmt(&self.handle, f)
+    }
+}
+
+impl<C> Clone for SwitchConn<C> {
+    fn clone(&self) -> Self {
+        Self {
+            handle: self.handle.clone(),
+            channel: self.channel.clone(),
+            // Safety: only meaningful in the context of a poll loop.
+            write_cancel_handle: None,
+            // Safety: only meaningful in the context of a poll loop.
+            read_cancel_handle: None,
+        }
+    }
+}
+
+impl<C> AsyncWrite for SwitchConn<C>
+where
+    C: Deref,
+    C::Target: ChannelIo,
+{
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        match self.channel.write(cx, &self.handle, buf) {
+            CancelablePoll::Ready(r) => Poll::Ready(r),
+            CancelablePoll::Pending(cancel) => {
+                self.write_cancel_handle = Some(cancel);
+                Poll::Pending
+            }
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        self.channel.shutdown(&self.handle, Shutdown::Both)?;
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+impl<C> AsyncRead for SwitchConn<C>
+where
+    C: ChannelIo,
+{
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.channel.read(cx, &self.handle, buf) {
+            CancelablePoll::Ready(r) => Poll::Ready(r),
+            CancelablePoll::Pending(cancel) => {
+                self.read_cancel_handle = Some(cancel);
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl<C> SwitchConn<C> {
+    /// Get inner handle.
+    pub fn to_handle(&self) -> Arc<Handle> {
+        self.handle.clone()
+    }
+
+    pub fn to_channel(&self) -> Arc<C> {
+        self.channel.clone()
     }
 }

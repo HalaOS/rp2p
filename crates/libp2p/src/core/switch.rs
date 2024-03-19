@@ -5,7 +5,6 @@ use std::{
 
 use identity::{PeerId, PublicKey};
 use multiaddr::Multiaddr;
-use multistream_select::Negotiated;
 use rasi::{executor::spawn, syscall::Handle, utils::cancelable_would_block};
 use rasi_ext::{
     future::event_map::EventMap,
@@ -19,8 +18,8 @@ use crate::{
 };
 
 use super::{
-    identity_push, identity_response, Channel, ConnPoolOfPeers, KeypairProvider, NeighborStorage,
-    P2pConn, P2pStream, ProtocolId, SwitchStream,
+    identity_push, identity_request, identity_response, Channel, ConnPoolOfPeers, KeypairProvider,
+    NeighborStorage, P2pConn, P2pStream, ProtocolId,
 };
 
 /// The immutable_switch statement of one [`Switch`]
@@ -121,7 +120,7 @@ impl Switch {
     pub async fn connect(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
         let p2p_conn = self.connect_inner(raddrs).await?;
 
-        let p2p_conn = p2p_conn.negotiate_peer_id(self.clone()).await?;
+        identity_request(self.clone(), p2p_conn.clone()).await?;
 
         self.conn_pool_of_peers.put(p2p_conn.clone()).await;
 
@@ -151,18 +150,17 @@ impl Switch {
     /// if needed(the peer connection pool is empty).
     ///
     /// Returns [`NeighborRoutePathNotFound`](P2pError::NeighborRoutePathNotFound), if this `peer_id` has no routing information.
-    pub async fn open_stream(&self, peer_id: &PeerId, protos: &[ProtocolId]) -> Result<P2pStream> {
+    pub async fn open_stream<P>(&self, peer_id: &PeerId, protos: P) -> Result<P2pStream>
+    where
+        P: IntoIterator<Item = ProtocolId>,
+    {
         let p2p_conn = if let Some(p2p_conn) = self.conn_pool_of_peers.get(peer_id).await {
             p2p_conn
         } else {
             self.connect(&self.neighbors_get(peer_id).await?).await?
         };
 
-        let stream = p2p_conn.open().await?;
-
-        let (negotiated_stream, protocol_id) = stream.client_select_protocol(protos).await?;
-
-        Ok((peer_id.clone(), protocol_id, negotiated_stream).into())
+        p2p_conn.open(protos).await
     }
 
     /// Accept a newly inbound stream from `peer`.
@@ -303,8 +301,7 @@ impl Switch {
     }
 
     async fn handle_incoming_conn(&self, p2p_conn: P2pConn) -> Result<()> {
-        // fetch peer's id.
-        let p2p_conn = p2p_conn.negotiate_peer_id(self.clone()).await?;
+        identity_request(self.clone(), p2p_conn.clone()).await?;
 
         // put the newly connection into peer pool.
         self.conn_pool_of_peers.put(p2p_conn.clone()).await;
@@ -315,77 +312,47 @@ impl Switch {
     }
 
     async fn conn_accept_loop(&self, p2p_conn: P2pConn) -> Result<()> {
-        while let Some(stream) = p2p_conn.accept().await {
-            let immutable_switch = self.immutable_switch.clone();
-            let mutable_switch = self.mutable_switch.clone();
+        loop {
+            let mut stream = p2p_conn
+                .accept(self.immutable_switch.protos.clone())
+                .await?;
 
-            // Safety: p2p_conn is identity negotiated.
-            let peer_id = p2p_conn.peer_id().map(Clone::clone).unwrap();
+            let mutable_switch = self.mutable_switch.clone();
 
             let mut this = self.clone();
 
-            let raddr = p2p_conn.peer_addr().clone();
-
             spawn(async move {
-                match stream
-                    .server_select_protocol(&immutable_switch.protos)
-                    .await
-                {
-                    Ok((mut stream, protocol_id)) => {
-                        match this
-                            .handle_core_protocols(
-                                &mut stream,
-                                &protocol_id,
-                                raddr,
-                                peer_id.clone(),
-                            )
-                            .await
-                        {
-                            Ok(true) => {
-                                return;
-                            }
-                            Err(err) => {
-                                log::error!(
-                                    "handle core protocol {}, returns error: {}",
-                                    protocol_id,
-                                    err
-                                );
-                                return;
-                            }
-                            Ok(false) => {}
-                        }
-
-                        mutable_switch
-                            .lock()
-                            .await
-                            .incoming
-                            .push_back((peer_id, protocol_id, stream).into());
+                match this.handle_core_protocols(&mut stream).await {
+                    Ok(true) => {
+                        return;
                     }
                     Err(err) => {
-                        log::warn!("negotiation with client cause an error: {}", err);
+                        log::error!(
+                            "handle core protocol {}, returns error: {}",
+                            stream.protocol_id(),
+                            err
+                        );
+                        return;
                     }
-                };
+                    Ok(false) => {}
+                }
+
+                mutable_switch.lock().await.incoming.push_back(stream);
             });
         }
-
-        Ok(())
     }
 
-    async fn handle_core_protocols(
-        &mut self,
-        stream: &mut Negotiated<SwitchStream>,
-        protocol_id: &ProtocolId,
-        raddr: Multiaddr,
-        peer_id: PeerId,
-    ) -> Result<bool> {
+    async fn handle_core_protocols(&mut self, stream: &mut P2pStream) -> Result<bool> {
+        let protocol_id = stream.protocol_id();
+
         if protocol_id.to_string() == "/ipfs/id/1.0.0" {
-            identity_response(self, stream, raddr).await?;
+            identity_response(self, stream).await?;
 
             return Ok(true);
         }
 
         if protocol_id.to_string() == "/ipfs/id/push/1.0.0" {
-            identity_push(self, stream, peer_id).await?;
+            identity_push(self, stream).await?;
 
             return Ok(true);
         }

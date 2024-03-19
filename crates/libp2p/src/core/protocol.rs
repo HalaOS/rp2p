@@ -1,9 +1,8 @@
 use std::{borrow::Cow, fmt::Display};
 
 use futures::{AsyncReadExt, AsyncWriteExt};
-use identity::{PeerId, PublicKey};
+use identity::PublicKey;
 use multiaddr::Multiaddr;
-use multistream_select::Negotiated;
 use protobuf::Message;
 use rasi_ext::utils::ReadBuf;
 use semver::Version;
@@ -11,9 +10,10 @@ use semver::Version;
 use crate::{
     errors::{P2pError, Result},
     proto::identify::Identify,
+    P2pStream,
 };
 
-use super::{P2pConn, Switch, SwitchStream};
+use super::{P2pConn, Switch};
 
 /// The protocol id type for libp2p protocols.
 ///
@@ -124,13 +124,9 @@ impl ProtocolId {
 }
 
 /// client-side use this function to execute identify request.
-pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<PeerId> {
+pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<()> {
     let identify = {
-        let stream = conn.open().await?;
-
-        let (mut stream, _) = stream
-            .client_select_protocol(&["/ipfs/id/1.0.0".try_into().unwrap()])
-            .await?;
+        let mut stream = conn.open(["/ipfs/id/1.0.0".try_into()?]).await?;
 
         let mut buf = ReadBuf::with_capacity(switch.immutable_switch.max_identity_packet_len);
 
@@ -147,10 +143,7 @@ pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<Pe
         Identify::parse_from_bytes(buf.chunk())?
     };
 
-    let conn_peer_id = conn
-        .public_key()
-        .expect("Upgraded connection must has pubkey.")
-        .to_peer_id();
+    let conn_peer_id = conn.peer_id();
 
     let pubkey = PublicKey::try_decode_protobuf(identify.publicKey())?;
 
@@ -168,18 +161,14 @@ pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<Pe
 
     switch.neighbors_put(peer_id, &raddrs).await?;
 
-    Ok(peer_id)
+    Ok(())
 }
 
 /// The responsor of identify request.
-pub(super) async fn identity_response(
-    switch: &Switch,
-    stream: &mut Negotiated<SwitchStream>,
-    raddr: Multiaddr,
-) -> Result<()> {
+pub(super) async fn identity_response(switch: &Switch, stream: &mut P2pStream) -> Result<()> {
     let mut identity = Identify::new();
 
-    identity.set_observedAddr(raddr.to_vec());
+    identity.set_observedAddr(stream.peer_addr().to_vec());
 
     identity.set_publicKey(switch.public_key().encode_protobuf());
 
@@ -199,11 +188,7 @@ pub(super) async fn identity_response(
 }
 
 /// Handle `/ipfs/id/push/1.0.0` request.
-pub(super) async fn identity_push(
-    switch: &mut Switch,
-    stream: &mut Negotiated<SwitchStream>,
-    peer_id: PeerId,
-) -> Result<PeerId> {
+pub(super) async fn identity_push(switch: &mut Switch, stream: &mut P2pStream) -> Result<()> {
     let identify = {
         let mut buf = ReadBuf::with_capacity(switch.immutable_switch.max_identity_packet_len);
 
@@ -226,7 +211,7 @@ pub(super) async fn identity_push(
         .map(|buf| Multiaddr::try_from(buf).map_err(Into::into))
         .collect::<Result<Vec<_>>>()?;
 
-    switch.neighbors_put(peer_id, &raddrs).await?;
+    switch.neighbors_put(stream.peer_id(), &raddrs).await?;
 
-    Ok(peer_id)
+    Ok(())
 }

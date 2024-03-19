@@ -15,13 +15,11 @@ pub struct ConnPoolOfPeers {
 impl ConnPoolOfPeers {
     /// Put a [`P2pConn`] into peer's pool
     pub async fn put(&self, conn: P2pConn) {
-        let peer_id = conn
-            .peer_id()
-            .expect("Only negotiated connection can be put int peer pool");
+        let peer_id = conn.peer_id();
 
         let mut pools = self.pools.lock().await;
 
-        if let Some(peer_pool) = pools.get_mut(peer_id) {
+        if let Some(peer_pool) = pools.get_mut(&peer_id) {
             peer_pool.push(conn);
         } else {
             pools.insert(peer_id.clone(), vec![conn]);
@@ -48,12 +46,19 @@ impl ConnPoolOfPeers {
         let mut pools = self.pools.lock().await;
 
         if let Some(mut peer_pool) = pools.remove(&peer_id) {
-            peer_pool
-                .sort_by(|lhs, rhs| lhs.inner_handle().partial_cmp(&rhs.inner_handle()).unwrap());
+            peer_pool.sort_by(|lhs, rhs| {
+                lhs.to_handle()
+                    .as_ref()
+                    .partial_cmp(rhs.to_handle().as_ref())
+                    .unwrap()
+            });
 
             for conn in dropping {
                 if let Ok(index) = peer_pool.binary_search_by(|c| {
-                    c.inner_handle().partial_cmp(&conn.inner_handle()).unwrap()
+                    c.to_handle()
+                        .as_ref()
+                        .partial_cmp(conn.to_handle().as_ref())
+                        .unwrap()
                 }) {
                     peer_pool.remove(index);
                 }
