@@ -57,12 +57,12 @@ pub trait HandleContext {
     fn fmt(&self, handle: &Handle, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
 
     /// Returns the connection's peer [`Multiaddr`] referenced by this handle.
-    fn peer_addr(&self, handle: &Handle) -> &Multiaddr;
+    fn peer_addr<'a>(&self, handle: &'a Handle) -> &'a Multiaddr;
 
     /// Get the peer [`PublicKey`] used to encrypt the connection referenced by this `handle`.
     ///
     /// If the connection lack security, returns None.
-    fn public_key(&self, handle: &Handle) -> Option<&PublicKey>;
+    fn public_key<'a>(&self, handle: &'a Handle) -> Option<&'a PublicKey>;
 
     /// Tests whether the connection referenced by the handle is a server-side connection.
     fn is_server(&self, handle: &Handle) -> bool;
@@ -87,7 +87,7 @@ pub trait Transport: HandleContext + ChannelIo + Sync + Send {
         cx: &mut Context<'_>,
         handle: &Handle,
         pending: Option<PendingHandle>,
-    ) -> CancelablePoll<io::Result<(Handle, Multiaddr)>>;
+    ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Create a transport connection, and connect to `raddr`.
     fn connect(
@@ -307,7 +307,7 @@ impl Channel {
         H: FnOnce(Result<P2pConn>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send,
     {
-        let (conn_handle, _) =
+        let conn_handle =
             cancelable_would_block(|cx, pending| self.transport.accept(cx, listener, pending))
                 .await?;
 
