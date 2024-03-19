@@ -1,15 +1,17 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
-    pin::Pin,
     sync::Arc,
     task::Context,
 };
 
-use futures::Future;
 use identity::PeerId;
-use rasi::{future::BoxFuture, syscall::Handle};
-use rasi_ext::utils::AsyncSpinMutex;
+use rand::{seq::IteratorRandom, thread_rng};
+use rasi::{
+    poll_cancelable,
+    syscall::{CancelablePoll, PendingHandle},
+};
+use rasi_ext::utils::{AsyncLockable, AsyncSpinMutex};
 
 use crate::{ConnPool, P2pConn};
 
@@ -19,12 +21,44 @@ pub struct AutoPingConnPool {
 }
 
 impl AutoPingConnPool {
-    async fn put(self, conn: P2pConn) -> io::Result<()> {
-        todo!()
+    async fn put(&self, conn: P2pConn) -> io::Result<()> {
+        let mut pools = self.pools.lock().await;
+
+        let peer_id = conn.peer_id();
+
+        if let Some(peer_pool) = pools.get_mut(&peer_id) {
+            peer_pool.insert(conn);
+        } else {
+            let mut peer_pool = HashSet::new();
+
+            peer_pool.insert(conn);
+
+            pools.insert(peer_id, peer_pool);
+        }
+
+        Ok(())
     }
 
-    async fn remove(self, conn: P2pConn) -> io::Result<()> {
-        todo!()
+    async fn get(&self, peer_id: &PeerId) -> io::Result<Option<P2pConn>> {
+        let mut pools = self.pools.lock().await;
+
+        if let Some(peer_pool) = pools.get_mut(&peer_id) {
+            Ok(Some(
+                peer_pool.iter().choose(&mut thread_rng()).cloned().unwrap(),
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn remove(&self, conn: P2pConn) -> io::Result<()> {
+        let mut pools = self.pools.lock().await;
+
+        if let Some(peer_pool) = pools.get_mut(&conn.peer_id()) {
+            peer_pool.remove(&conn);
+        }
+
+        Ok(())
     }
 }
 
@@ -33,28 +67,26 @@ impl ConnPool for AutoPingConnPool {
         &self,
         cx: &mut Context<'_>,
         conn: crate::P2pConn,
-        cancel_handle: Option<Handle>,
+        cancel_handle: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<()>> {
-        if let Some(cancel_handle) = cancel_handle {
-            cancel_handle.downcast::<BoxFuture<'static, io::Result<()>>>();
-        }
-
-        let mut fut: BoxFuture<'static, io::Result<()>> = Box::pin(self.clone().put(conn.clone()));
-
-        match Pin::new(&mut fut).poll(cx) {
-            std::task::Poll::Ready(_) => todo!(),
-            std::task::Poll::Pending => todo!(),
-        }
-
-        todo!()
+        poll_cancelable!(Put, cx, cancel_handle, || self.put(conn))
     }
 
-    fn get(
+    fn get<'a>(
         &self,
-        cx: &mut Context<'_>,
-        peer_id: &identity::PeerId,
-        cancel_handle: Option<Handle>,
+        cx: &'a mut Context<'_>,
+        peer_id: &'a identity::PeerId,
+        cancel_handle: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<Option<crate::P2pConn>>> {
-        todo!()
+        poll_cancelable!(Get, cx, cancel_handle, || self.get(peer_id))
+    }
+
+    fn remove<'a>(
+        &'a self,
+        cx: &'a mut Context<'_>,
+        conn: P2pConn,
+        cancel_handle: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<()>> {
+        poll_cancelable!(Remove, cx, cancel_handle, || self.remove(conn))
     }
 }

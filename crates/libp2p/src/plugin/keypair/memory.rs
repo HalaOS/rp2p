@@ -1,5 +1,5 @@
 use identity::Keypair;
-use rasi::syscall::CancelablePoll;
+use rasi::syscall::{CancelablePoll, PendingHandle};
 
 use crate::KeypairProvider;
 
@@ -23,6 +23,7 @@ impl KeypairProvider for MemoryKeyProvider {
     fn public_key(
         &self,
         _cx: &mut std::task::Context<'_>,
+        _: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<identity::PublicKey>> {
         CancelablePoll::Ready(Ok(self.0.public()))
     }

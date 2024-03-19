@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use identity::PeerId;
 use multiaddr::Multiaddr;
-use rasi::syscall::CancelablePoll;
+use rasi::syscall::{CancelablePoll, PendingHandle};
 use rasi_ext::utils::{Lockable, SpinMutex};
 
 use crate::NeighborStorage;
@@ -16,6 +16,7 @@ impl NeighborStorage for MemoryNeighbors {
         _cx: &mut std::task::Context<'_>,
         peer_id: identity::PeerId,
         raddrs: &[multiaddr::Multiaddr],
+        _: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<()>> {
         let mut table = self.0.lock();
         if let Some(adds) = table.get_mut(&peer_id) {
@@ -39,6 +40,7 @@ impl NeighborStorage for MemoryNeighbors {
         &self,
         _cx: &mut std::task::Context<'_>,
         peer_id: &identity::PeerId,
+        _: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<Vec<multiaddr::Multiaddr>>> {
         let addrs = self
             .0
@@ -55,6 +57,7 @@ impl NeighborStorage for MemoryNeighbors {
         _cx: &mut std::task::Context<'_>,
         peer_id: &identity::PeerId,
         raddrs: &[multiaddr::Multiaddr],
+        _: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<()>> {
         if let Some(adds) = self.0.lock().get_mut(&peer_id) {
             for raddr in raddrs {
@@ -69,6 +72,7 @@ impl NeighborStorage for MemoryNeighbors {
         &self,
         _cx: &mut std::task::Context<'_>,
         peer_id: &identity::PeerId,
+        _: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<()>> {
         self.0.lock().remove(peer_id);
         CancelablePoll::Ready(Ok(()))

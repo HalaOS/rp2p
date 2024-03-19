@@ -12,7 +12,7 @@ use identity::PublicKey;
 use multiaddr::Multiaddr;
 use rasi::{
     executor::spawn,
-    syscall::{CancelablePoll, Handle},
+    syscall::{CancelablePoll, Handle, PendingHandle},
     utils::cancelable_would_block,
 };
 
@@ -30,6 +30,7 @@ pub trait ChannelIo: Sync + Send + Unpin {
         cx: &mut Context<'_>,
         handle: &Handle,
         buf: &[u8],
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<usize>>;
 
     /// Read data via the `connection handle` from peer.
@@ -40,6 +41,7 @@ pub trait ChannelIo: Sync + Send + Unpin {
         cx: &mut Context<'_>,
         handle: &Handle,
         buf: &mut [u8],
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<usize>>;
 
     /// Shuts down the read, write, or both halves of the connection referenced by the [`handle`](Handle).
@@ -73,6 +75,7 @@ pub trait Transport: HandleContext + ChannelIo + Sync + Send {
         cx: &mut Context<'_>,
         keypair: Arc<Box<dyn KeypairProvider>>,
         laddr: &Multiaddr,
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Accept a newly incoming transport connection.
@@ -80,6 +83,7 @@ pub trait Transport: HandleContext + ChannelIo + Sync + Send {
         &self,
         cx: &mut Context<'_>,
         handle: &Handle,
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<(Handle, Multiaddr)>>;
 
     /// Create a transport connection, and connect to `raddr`.
@@ -88,6 +92,7 @@ pub trait Transport: HandleContext + ChannelIo + Sync + Send {
         cx: &mut Context<'_>,
         raddr: &Multiaddr,
         keypair: Arc<Box<dyn KeypairProvider>>,
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<Handle>>;
 }
 
@@ -112,6 +117,7 @@ pub trait SecureUpgrade: HandleContext + ChannelIo + Sync + Send {
         &self,
         cx: &mut Context<'_>,
         upgrade_handle: &Handle,
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<PublicKey>>;
 }
 
@@ -137,13 +143,24 @@ pub trait MuxingUpgrade: HandleContext + Sync + Send {
         &self,
         cx: &mut Context<'_>,
         upgrade_handle: &Handle,
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<PublicKey>>;
 
     /// Accept a newly incoming muxing stream.
-    fn accept(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
+    fn accept(
+        &self,
+        cx: &mut Context<'_>,
+        handle: &Handle,
+        pending: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Create a newly outbound muxing stream.
-    fn connect(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
+    fn connect(
+        &self,
+        cx: &mut Context<'_>,
+        handle: &Handle,
+        pending: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Write data via the `connection handle` to peer.
     ///
@@ -153,6 +170,7 @@ pub trait MuxingUpgrade: HandleContext + Sync + Send {
         cx: &mut Context<'_>,
         stream_handle: &Handle,
         buf: &[u8],
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<usize>>;
 
     /// Read data via the `connection handle` from peer.
@@ -163,6 +181,7 @@ pub trait MuxingUpgrade: HandleContext + Sync + Send {
         cx: &mut Context<'_>,
         stream_handle: &Handle,
         buf: &mut [u8],
+        pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<usize>>;
 
     /// Shuts down the read, write, or both halves of the connection referenced by the [`handle`](Handle).
@@ -202,7 +221,10 @@ impl Upgrader {
             self.secure_upgrade
                 .upgrade_client(handle, transport, keypair.clone())?;
 
-        cancelable_would_block(|cx| self.secure_upgrade.handshake(cx, &upgrade_handle)).await?;
+        cancelable_would_block(|cx, pending| {
+            self.secure_upgrade.handshake(cx, &upgrade_handle, pending)
+        })
+        .await?;
 
         let upgrade_handle = self.muxing_updrade.upgrade_client(
             upgrade_handle,
@@ -210,7 +232,10 @@ impl Upgrader {
             keypair.clone(),
         )?;
 
-        cancelable_would_block(|cx| self.muxing_updrade.handshake(cx, &upgrade_handle)).await?;
+        cancelable_would_block(|cx, pending| {
+            self.muxing_updrade.handshake(cx, &upgrade_handle, pending)
+        })
+        .await?;
 
         Ok((Arc::new(upgrade_handle), self.muxing_updrade.clone()).into())
     }
@@ -226,7 +251,10 @@ impl Upgrader {
             self.secure_upgrade
                 .upgrade_server(handle, transport, keypair.clone())?;
 
-        cancelable_would_block(|cx| self.secure_upgrade.handshake(cx, &upgrade_handle)).await?;
+        cancelable_would_block(|cx, pending| {
+            self.secure_upgrade.handshake(cx, &upgrade_handle, pending)
+        })
+        .await?;
 
         let upgrade_handle = self.muxing_updrade.upgrade_server(
             upgrade_handle,
@@ -234,7 +262,10 @@ impl Upgrader {
             keypair.clone(),
         )?;
 
-        cancelable_would_block(|cx| self.muxing_updrade.handshake(cx, &upgrade_handle)).await?;
+        cancelable_would_block(|cx, pending| {
+            self.muxing_updrade.handshake(cx, &upgrade_handle, pending)
+        })
+        .await?;
 
         Ok((Arc::new(upgrade_handle), self.muxing_updrade.clone()).into())
     }
@@ -274,7 +305,8 @@ impl Channel {
         Fut: Future<Output = ()> + Send,
     {
         let (conn_handle, _) =
-            cancelable_would_block(|cx| self.transport.accept(cx, listener)).await?;
+            cancelable_would_block(|cx, pending| self.transport.accept(cx, listener, pending))
+                .await?;
 
         let transport = self.transport.clone();
         let upgrader = self.upgrader.clone();
@@ -297,8 +329,8 @@ impl Channel {
         raddr: &Multiaddr,
         keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
-        let conn_handle = cancelable_would_block(|cx: &mut Context<'_>| {
-            self.transport.connect(cx, raddr, keypair.clone())
+        let conn_handle = cancelable_would_block(|cx: &mut Context<'_>, pending| {
+            self.transport.connect(cx, raddr, keypair.clone(), pending)
         })
         .await?;
 
@@ -312,8 +344,8 @@ impl Channel {
 pub struct SwitchConn<C> {
     pub(super) handle: Arc<Handle>,
     pub(super) channel: Arc<C>,
-    write_cancel_handle: Option<Handle>,
-    read_cancel_handle: Option<Handle>,
+    write_cancel_handle: Option<PendingHandle>,
+    read_cancel_handle: Option<PendingHandle>,
 }
 
 impl<C> From<(Arc<Handle>, Arc<C>)> for SwitchConn<C> {
@@ -360,7 +392,8 @@ where
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<io::Result<usize>> {
-        match self.channel.write(cx, &self.handle, buf) {
+        let pending = self.write_cancel_handle.take();
+        match self.channel.write(cx, &self.handle, buf, pending) {
             CancelablePoll::Ready(r) => Poll::Ready(r),
             CancelablePoll::Pending(cancel) => {
                 self.write_cancel_handle = Some(cancel);
@@ -394,7 +427,8 @@ where
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<io::Result<usize>> {
-        match self.channel.read(cx, &self.handle, buf) {
+        let pending = self.read_cancel_handle.take();
+        match self.channel.read(cx, &self.handle, buf, pending) {
             CancelablePoll::Ready(r) => Poll::Ready(r),
             CancelablePoll::Pending(cancel) => {
                 self.read_cancel_handle = Some(cancel);

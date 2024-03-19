@@ -121,8 +121,12 @@ impl Switch {
 
         identity_request(self.clone(), p2p_conn.clone()).await?;
 
-        cancelable_would_block(|cx| self.immutable_switch.conn_pool.put(cx, p2p_conn.clone()))
-            .await?;
+        cancelable_would_block(|cx, pending| {
+            self.immutable_switch
+                .conn_pool
+                .put(cx, p2p_conn.clone(), pending)
+        })
+        .await?;
 
         let this = self.clone();
 
@@ -154,8 +158,10 @@ impl Switch {
     where
         P: IntoIterator<Item = ProtocolId>,
     {
-        let p2p_conn =
-            cancelable_would_block(|cx| self.immutable_switch.conn_pool.get(cx, peer_id)).await?;
+        let p2p_conn = cancelable_would_block(|cx, pending| {
+            self.immutable_switch.conn_pool.get(cx, peer_id, pending)
+        })
+        .await?;
 
         let p2p_conn = if let Some(p2p_conn) = p2p_conn {
             p2p_conn
@@ -194,38 +200,40 @@ impl Switch {
 
     /// manually update a route for the neighbor peer by [`id`](PeerId).
     pub async fn neighbors_put(&self, peer_id: PeerId, raddrs: &[Multiaddr]) -> Result<()> {
-        Ok(cancelable_would_block(|cx| {
+        Ok(cancelable_would_block(|cx, pending| {
             self.immutable_switch
                 .neighbors
-                .neighbors_put(cx, peer_id, raddrs)
+                .neighbors_put(cx, peer_id, raddrs, pending)
         })
         .await?)
     }
 
     /// Returns a copy of route table of one neighbor peer by [`id`](PeerId).
     pub async fn neighbors_get(&self, peer_id: &PeerId) -> Result<Vec<Multiaddr>> {
-        Ok(
-            cancelable_would_block(|cx| self.immutable_switch.neighbors.neighbors_get(cx, peer_id))
-                .await?,
-        )
+        Ok(cancelable_would_block(|cx, pending| {
+            self.immutable_switch
+                .neighbors
+                .neighbors_get(cx, peer_id, pending)
+        })
+        .await?)
     }
 
     /// remove some route information from neighbor peer by [`id`](PeerId).
     pub async fn neighbors_delete(&self, peer_id: &PeerId, raddrs: &[Multiaddr]) -> Result<()> {
-        Ok(cancelable_would_block(|cx| {
+        Ok(cancelable_would_block(|cx, pending| {
             self.immutable_switch
                 .neighbors
-                .neighbors_delete(cx, peer_id, raddrs)
+                .neighbors_delete(cx, peer_id, raddrs, pending)
         })
         .await?)
     }
 
     /// Completely, remove the route table of one neighbor peer by [`id`](PeerId).
     pub async fn neighbors_delete_all(&self, peer_id: &PeerId) -> Result<()> {
-        Ok(cancelable_would_block(|cx| {
+        Ok(cancelable_would_block(|cx, pending| {
             self.immutable_switch
                 .neighbors
-                .neighbors_delete_all(cx, peer_id)
+                .neighbors_delete_all(cx, peer_id, pending)
         })
         .await?)
     }
@@ -239,10 +247,10 @@ impl Switch {
                 .channel_of_multiaddr(laddr)
                 .ok_or_else(|| P2pError::BindMultiAddr(laddr.clone()))?;
 
-            let handle = cancelable_would_block(|cx| {
+            let handle = cancelable_would_block(|cx, pending| {
                 channel
                     .transport
-                    .bind(cx, self.immutable_switch.keypair.clone(), &laddr)
+                    .bind(cx, self.immutable_switch.keypair.clone(), &laddr, pending)
             })
             .await?;
 
@@ -307,8 +315,12 @@ impl Switch {
         identity_request(self.clone(), p2p_conn.clone()).await?;
 
         // put the newly connection into peer pool.
-        cancelable_would_block(|cx| self.immutable_switch.conn_pool.put(cx, p2p_conn.clone()))
-            .await?;
+        cancelable_would_block(|cx, pending| {
+            self.immutable_switch
+                .conn_pool
+                .put(cx, p2p_conn.clone(), pending)
+        })
+        .await?;
 
         self.conn_accept_loop(p2p_conn).await?;
 
@@ -492,7 +504,8 @@ impl SwitchBuilder {
         #[cfg(not(feature = "conn_pool"))]
         let conn_pool = { Arc::new(self.conn_pool.expect("Must provide conn_pool plugin.")) };
 
-        let public_key = cancelable_would_block(|cx| keypair.public_key(cx)).await?;
+        let public_key =
+            cancelable_would_block(|cx, pending| keypair.public_key(cx, pending)).await?;
 
         if self.laddrs.is_empty() {
             log::warn!("Switch created without bind any listener.");
