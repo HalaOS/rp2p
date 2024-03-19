@@ -37,6 +37,9 @@ pub enum P2pError {
 
     #[error(transparent)]
     MultiaddrErr(#[from] multiaddr::Error),
+
+    #[error("Ping timeout or mismatched")]
+    Ping,
 }
 
 impl From<P2pError> for io::Error {

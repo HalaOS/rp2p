@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    identity_push, identity_request, identity_response, Channel, KeypairProvider, NeighborStorage,
-    P2pConn, P2pStream, ProtocolId,
+    identity_push, identity_request, identity_response, ping_echo, Channel, KeypairProvider,
+    NeighborStorage, P2pConn, P2pStream, ProtocolId,
 };
 
 /// The immutable_switch statement of one [`Switch`]
@@ -337,11 +337,14 @@ impl Switch {
 
             let mut this = self.clone();
 
+            let p2p_conn = p2p_conn.clone();
+
             spawn(async move {
-                match this.handle_core_protocols(&mut stream).await {
+                match this.handle_core_protocols(p2p_conn, &mut stream).await {
                     Ok(true) => {
                         return;
                     }
+                    Ok(false) => {}
                     Err(err) => {
                         log::error!(
                             "handle core protocol {}, returns error: {}",
@@ -350,7 +353,6 @@ impl Switch {
                         );
                         return;
                     }
-                    Ok(false) => {}
                 }
 
                 mutable_switch.lock().await.incoming.push_back(stream);
@@ -358,7 +360,11 @@ impl Switch {
         }
     }
 
-    async fn handle_core_protocols(&mut self, stream: &mut P2pStream) -> Result<bool> {
+    async fn handle_core_protocols(
+        &mut self,
+        p2p_conn: P2pConn,
+        stream: &mut P2pStream,
+    ) -> Result<bool> {
         let protocol_id = stream.protocol_id();
 
         if protocol_id.to_string() == "/ipfs/id/1.0.0" {
@@ -373,7 +379,23 @@ impl Switch {
             return Ok(true);
         }
 
-        Ok(false)
+        if protocol_id.to_string() == "/ipfs/ping/1.0.0" {
+            if let Err(err) = ping_echo(stream).await {
+                log::trace!("{}, ping echo with error: {}", p2p_conn.peer_addr(), err);
+
+                // remove connection from pool.
+                cancelable_would_block(|cx, pending| {
+                    self.immutable_switch
+                        .conn_pool
+                        .remove(cx, p2p_conn.clone(), pending)
+                })
+                .await?;
+            }
+
+            return Ok(true);
+        }
+
+        return Ok(false);
     }
 }
 
@@ -466,7 +488,7 @@ impl SwitchBuilder {
 
     /// Consume the `builder` and generate a new [`Switch`] instance.
     pub async fn create(self) -> Result<Switch> {
-        let protos = ["/ipfs/id/1.0.0"]
+        let protos = ["/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0", "/ipfs/ping/1.0.0"]
             .into_iter()
             .map(|p| p.try_into())
             .chain(self.protos.into_iter())
@@ -492,17 +514,17 @@ impl SwitchBuilder {
         };
 
         #[cfg(not(feature = "memory_neighbors"))]
-        let neighbors = { Arc::new(self.neighbors.expect("Must provide neighbors plugin.")) };
+        let neighbors = { self.neighbors.expect("Must provide neighbors plugin.") };
 
-        #[cfg(feature = "conn_pool")]
+        #[cfg(feature = "auto_ping_conn_pool")]
         let conn_pool = {
             use crate::plugin::conn_pool::AutoPingConnPool;
             self.conn_pool
                 .unwrap_or_else(|| Box::new(AutoPingConnPool::default()))
         };
 
-        #[cfg(not(feature = "conn_pool"))]
-        let conn_pool = { Arc::new(self.conn_pool.expect("Must provide conn_pool plugin.")) };
+        #[cfg(not(feature = "auto_ping_conn_pool"))]
+        let conn_pool = { self.conn_pool.expect("Must provide conn_pool plugin.") };
 
         let public_key =
             cancelable_would_block(|cx, pending| keypair.public_key(cx, pending)).await?;
@@ -546,6 +568,6 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(switch.immutable_switch.protos.len(), 2);
+        assert_eq!(switch.immutable_switch.protos.len(), 4);
     }
 }

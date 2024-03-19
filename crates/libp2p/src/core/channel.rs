@@ -63,6 +63,9 @@ pub trait HandleContext {
     ///
     /// If the connection lack security, returns None.
     fn public_key(&self, handle: &Handle) -> Option<&PublicKey>;
+
+    /// Tests whether the connection referenced by the handle is a server-side connection.
+    fn is_server(&self, handle: &Handle) -> bool;
 }
 
 pub trait Transport: HandleContext + ChannelIo + Sync + Send {

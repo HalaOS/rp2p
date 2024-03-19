@@ -71,6 +71,11 @@ impl P2pConn {
         self.muxing.peer_addr(&self.handle)
     }
 
+    /// Tests whether the connection referenced by the handle is a server-side connection.
+    pub fn is_server(&self) -> bool {
+        self.muxing.is_server(&self.handle)
+    }
+
     /// Open a outbound stream with suggestion protocols.
     pub async fn open<P>(&self, protos: P) -> Result<P2pStream>
     where

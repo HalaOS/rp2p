@@ -33,11 +33,12 @@ protobuf-codegen = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [features]
+default = ["memory_keypair", "memory_neighbors", "auto_ping_conn_pool"]
 kad = []
 circuit = []
 memory_keypair = []
 memory_neighbors = []
-conn_pool = []
+auto_ping_conn_pool = []
 tcp = []
 tls = []
 yamux = []

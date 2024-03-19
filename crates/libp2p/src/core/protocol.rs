@@ -215,3 +215,14 @@ pub(super) async fn identity_push(switch: &mut Switch, stream: &mut P2pStream) -
 
     Ok(())
 }
+
+/// Handle `/ipfs/ping/1.0.0` request.
+pub(super) async fn ping_echo(stream: &mut P2pStream) -> Result<()> {
+    loop {
+        let mut buf = vec![0; 32];
+
+        stream.read_exact(&mut buf).await?;
+
+        stream.write_all(&buf).await?;
+    }
+}
