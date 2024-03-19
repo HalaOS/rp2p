@@ -1,4 +1,5 @@
 use std::{
+    hash::Hash,
     io,
     net::Shutdown,
     pin::Pin,
@@ -34,6 +35,12 @@ pub struct P2pConn {
 impl PartialEq for P2pConn {
     fn eq(&self, other: &Self) -> bool {
         self.handle == other.handle
+    }
+}
+
+impl Hash for P2pConn {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.handle.hash(state)
     }
 }
 

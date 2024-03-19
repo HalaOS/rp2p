@@ -13,13 +13,12 @@ use rasi_ext::{
 
 use crate::{
     errors::{P2pError, Result},
-    keypair::memory::MemoryKeyProvider,
-    neighbors::memory::MemoryNeighbors,
+    ConnPool,
 };
 
 use super::{
-    identity_push, identity_request, identity_response, Channel, ConnPoolOfPeers, KeypairProvider,
-    NeighborStorage, P2pConn, P2pStream, ProtocolId,
+    identity_push, identity_request, identity_response, Channel, KeypairProvider, NeighborStorage,
+    P2pConn, P2pStream, ProtocolId,
 };
 
 /// The immutable_switch statement of one [`Switch`]
@@ -31,6 +30,7 @@ pub(super) struct ImmutableSwitch {
     protos: Vec<ProtocolId>,
     channels: Vec<Channel>,
     neighbors: Box<dyn NeighborStorage>,
+    conn_pool: Box<dyn ConnPool>,
     keypair: Arc<Box<dyn KeypairProvider>>,
 }
 
@@ -69,7 +69,6 @@ pub struct Switch {
     pub(super) immutable_switch: Arc<ImmutableSwitch>,
     mutable_switch: Arc<AsyncSpinMutex<MutableSwitch>>,
     event_map: Arc<EventMap<SwitchEvent>>,
-    conn_pool_of_peers: Arc<ConnPoolOfPeers>,
 }
 
 impl Switch {
@@ -122,7 +121,8 @@ impl Switch {
 
         identity_request(self.clone(), p2p_conn.clone()).await?;
 
-        self.conn_pool_of_peers.put(p2p_conn.clone()).await;
+        cancelable_would_block(|cx| self.immutable_switch.conn_pool.put(cx, p2p_conn.clone()))
+            .await?;
 
         let this = self.clone();
 
@@ -154,7 +154,10 @@ impl Switch {
     where
         P: IntoIterator<Item = ProtocolId>,
     {
-        let p2p_conn = if let Some(p2p_conn) = self.conn_pool_of_peers.get(peer_id).await {
+        let p2p_conn =
+            cancelable_would_block(|cx| self.immutable_switch.conn_pool.get(cx, peer_id)).await?;
+
+        let p2p_conn = if let Some(p2p_conn) = p2p_conn {
             p2p_conn
         } else {
             self.connect(&self.neighbors_get(peer_id).await?).await?
@@ -304,7 +307,8 @@ impl Switch {
         identity_request(self.clone(), p2p_conn.clone()).await?;
 
         // put the newly connection into peer pool.
-        self.conn_pool_of_peers.put(p2p_conn.clone()).await;
+        cancelable_would_block(|cx| self.immutable_switch.conn_pool.put(cx, p2p_conn.clone()))
+            .await?;
 
         self.conn_accept_loop(p2p_conn).await?;
 
@@ -366,11 +370,12 @@ impl Switch {
 pub struct SwitchBuilder {
     agent_version: String,
     max_identity_packet_len: usize,
-    keypair: Option<Box<dyn KeypairProvider>>,
-    channels: Vec<Channel>,
-    neighbors: Option<Box<dyn NeighborStorage>>,
     laddrs: Vec<Multiaddr>,
     protos: Vec<Result<ProtocolId>>,
+    channels: Vec<Channel>,
+    keypair: Option<Box<dyn KeypairProvider>>,
+    neighbors: Option<Box<dyn NeighborStorage>>,
+    conn_pool: Option<Box<dyn ConnPool>>,
 }
 
 impl SwitchBuilder {
@@ -455,10 +460,37 @@ impl SwitchBuilder {
             .chain(self.protos.into_iter())
             .collect::<Result<HashSet<_>>>()?;
 
-        let keypair = Arc::new(
-            self.keypair
-                .unwrap_or_else(|| Box::new(MemoryKeyProvider::default())),
-        );
+        #[cfg(feature = "memory_keypair")]
+        let keypair = {
+            use crate::plugin::keypair::memory::MemoryKeyProvider;
+            Arc::new(
+                self.keypair
+                    .unwrap_or_else(|| Box::new(MemoryKeyProvider::default())),
+            )
+        };
+
+        #[cfg(not(feature = "memory_keypair"))]
+        let keypair = { Arc::new(self.keypair.expect("Must provide keypair plugin.")) };
+
+        #[cfg(feature = "memory_neighbors")]
+        let neighbors = {
+            use crate::plugin::neighbors::memory::MemoryNeighbors;
+            self.neighbors
+                .unwrap_or_else(|| Box::new(MemoryNeighbors::default()))
+        };
+
+        #[cfg(not(feature = "memory_neighbors"))]
+        let neighbors = { Arc::new(self.neighbors.expect("Must provide neighbors plugin.")) };
+
+        #[cfg(feature = "conn_pool")]
+        let conn_pool = {
+            use crate::plugin::conn_pool::AutoPingConnPool;
+            self.conn_pool
+                .unwrap_or_else(|| Box::new(AutoPingConnPool::default()))
+        };
+
+        #[cfg(not(feature = "conn_pool"))]
+        let conn_pool = { Arc::new(self.conn_pool.expect("Must provide conn_pool plugin.")) };
 
         let public_key = cancelable_would_block(|cx| keypair.public_key(cx)).await?;
 
@@ -475,14 +507,12 @@ impl SwitchBuilder {
                 keypair,
                 channels: self.channels,
                 protos: protos.into_iter().collect::<Vec<_>>(),
-                neighbors: self
-                    .neighbors
-                    .unwrap_or_else(|| Box::new(MemoryNeighbors::default())),
+                neighbors,
+                conn_pool,
             }),
 
             event_map: Default::default(),
             mutable_switch: Default::default(),
-            conn_pool_of_peers: Default::default(),
         };
 
         switch.start_listener().await?;

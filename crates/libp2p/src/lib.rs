@@ -1,7 +1,6 @@
 pub mod channel;
 pub mod errors;
-pub mod keypair;
-pub mod neighbors;
+pub mod plugin;
 pub mod protocols;
 
 mod core;
