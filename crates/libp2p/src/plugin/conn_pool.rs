@@ -27,20 +27,30 @@ use rasi::io::AsyncWriteExt;
 
 #[derive(Clone)]
 pub struct AutoPingConnPool {
-    ping_duration: Duration,
+    ping_duration: Option<Duration>,
     pools: Arc<AsyncSpinMutex<HashMap<PeerId, HashSet<P2pConn>>>>,
 }
 
 impl Default for AutoPingConnPool {
     fn default() -> Self {
         Self {
-            ping_duration: Duration::from_secs(60),
+            ping_duration: Some(Duration::from_secs(60)),
             pools: Default::default(),
         }
     }
 }
 
 impl AutoPingConnPool {
+    /// Create new connection pool, with provided `ping_duration`.
+    ///
+    /// If `ping_duration` is None, the auto ping test process will not start.
+    pub fn new(ping_duration: Option<Duration>) -> Self {
+        Self {
+            ping_duration,
+            ..Default::default()
+        }
+    }
+
     async fn put(&self, conn: P2pConn) {
         let mut pools = self.pools.lock().await;
 
@@ -56,9 +66,10 @@ impl AutoPingConnPool {
             pools.insert(peer_id, peer_pool);
         }
 
-        if !conn.is_server() {
+        if !conn.is_server() && self.ping_duration.is_some() {
             let this = self.clone();
-            let ping_duration = self.ping_duration;
+            let ping_duration = self.ping_duration.unwrap();
+
             spawn(async move {
                 this.ping_loop(conn, ping_duration).await;
             });
