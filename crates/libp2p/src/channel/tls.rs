@@ -8,7 +8,7 @@ use std::{
 use boring::ssl::{MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream};
 use bytes::BytesMut;
 use multiaddr::Multiaddr;
-use rasi::syscall::{CancelablePoll, Handle, PendingHandle};
+use rasi::syscall::{CancelablePoll, Handle};
 use rasi_ext::utils::{Lockable, LockableNew, SpinMutex};
 
 use crate::{errors::P2pError, ChannelIo, HandleContext, SecureUpgrade, Transport};
@@ -43,12 +43,9 @@ impl TlsBuffer {
     pub fn register_write(&mut self, waker: Waker) {
         self.write_waker = Some(waker);
     }
-
-    pub fn shutdown(&mut self, how: Shutdown) -> io::Result<()> {
-        self.transport.shutdown(&self.handle, how)
-    }
 }
 
+#[allow(unused)]
 impl io::Write for TlsBuffer {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         todo!()
@@ -59,6 +56,7 @@ impl io::Write for TlsBuffer {
     }
 }
 
+#[allow(unused)]
 impl io::Read for TlsBuffer {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         todo!()
@@ -148,7 +146,7 @@ impl TlsStream {
                     }
                     Err(boring::ssl::HandshakeError::WouldBlock(handshake)) => {
                         *state = TlsState::Handshake(Some(handshake));
-                        return CancelablePoll::Pending(PendingHandle::new(()));
+                        return CancelablePoll::Pending(None);
                     }
                     Err(_) => todo!(),
                 }
@@ -175,7 +173,7 @@ impl ChannelIo for TlsSecureUpgrade {
             Ok(write_size) => {
                 // the buf is full.
                 if write_size == 0 {
-                    return CancelablePoll::Pending(PendingHandle::new(()));
+                    return CancelablePoll::Pending(None);
                 }
 
                 return CancelablePoll::Ready(Ok(write_size));
@@ -203,7 +201,7 @@ impl ChannelIo for TlsSecureUpgrade {
             Ok(read_size) => {
                 // the buf is empty.
                 if read_size == 0 {
-                    return CancelablePoll::Pending(PendingHandle::new(()));
+                    return CancelablePoll::Pending(None);
                 }
 
                 return CancelablePoll::Ready(Ok(read_size));
@@ -234,9 +232,7 @@ impl HandleContext for TlsSecureUpgrade {
         stream.transport.peer_addr(&stream.handle)
     }
 
-    fn public_key<'a>(&self, handle: &'a Handle) -> Option<&'a identity::PublicKey> {
-        let stream = handle.downcast::<TlsStream>().expect("Expect TlsStream");
-
+    fn public_key<'a>(&self, _handle: &'a Handle) -> Option<&'a identity::PublicKey> {
         todo!()
     }
 

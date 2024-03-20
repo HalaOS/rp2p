@@ -4,13 +4,9 @@ use std::{
 };
 
 use multiaddr::{Multiaddr, Protocol};
-use rasi::{
-    io::{ReadHalf, WriteHalf},
-    syscall::{global_network, CancelablePoll, Handle, Network},
-};
-use rasi_ext::net::tls::SslStream;
+use rasi::syscall::{global_network, CancelablePoll, Handle, Network};
 
-use crate::{ChannelIo, HandleContext, SecureUpgrade, Transport};
+use crate::{ChannelIo, HandleContext, Transport};
 
 pub struct TcpTransport;
 

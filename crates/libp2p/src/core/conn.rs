@@ -183,7 +183,7 @@ impl AsyncRead for SwitchStream {
         {
             CancelablePoll::Ready(r) => Poll::Ready(r),
             CancelablePoll::Pending(handle) => {
-                self.read_cancel_handle = Some(handle);
+                self.read_cancel_handle = handle;
                 Poll::Pending
             }
         }
@@ -205,7 +205,7 @@ impl AsyncWrite for SwitchStream {
         {
             CancelablePoll::Ready(r) => Poll::Ready(r),
             CancelablePoll::Pending(handle) => {
-                self.write_cancel_handle = Some(handle);
+                self.write_cancel_handle = handle;
                 Poll::Pending
             }
         }

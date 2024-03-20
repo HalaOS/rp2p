@@ -1,13 +1,6 @@
-use std::{
-    fmt::Debug,
-    io,
-    net::Shutdown,
-    ops::Deref,
-    sync::Arc,
-    task::{Context, Poll},
-};
+use std::{io, net::Shutdown, sync::Arc, task::Context};
 
-use futures::{AsyncRead, AsyncWrite, Future};
+use futures::Future;
 use identity::PublicKey;
 use multiaddr::Multiaddr;
 use rasi::{
