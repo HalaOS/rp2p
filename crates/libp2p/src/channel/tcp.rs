@@ -4,7 +4,11 @@ use std::{
 };
 
 use multiaddr::{Multiaddr, Protocol};
-use rasi::syscall::{global_network, CancelablePoll, Handle, Network};
+use rasi::{
+    io::{ReadHalf, WriteHalf},
+    syscall::{global_network, CancelablePoll, Handle, Network},
+};
+use rasi_ext::net::tls::SslStream;
 
 use crate::{ChannelIo, HandleContext, SecureUpgrade, Transport};
 
@@ -226,85 +230,5 @@ impl Transport for TcpTransport {
             CancelablePoll::Ready(Err(err)) => return CancelablePoll::Ready(Err(err)),
             CancelablePoll::Pending(pending) => return CancelablePoll::Pending(pending),
         }
-    }
-}
-
-pub struct TlsSecureUpgrade;
-
-struct TlsStream {
-    handle: Handle,
-    transport: std::sync::Arc<Box<dyn Transport>>,
-}
-
-impl ChannelIo for TlsSecureUpgrade {
-    fn write(
-        &self,
-        cx: &mut std::task::Context<'_>,
-        handle: &Handle,
-        buf: &[u8],
-        pending: Option<rasi::syscall::PendingHandle>,
-    ) -> CancelablePoll<io::Result<usize>> {
-        todo!()
-    }
-
-    fn read(
-        &self,
-        cx: &mut std::task::Context<'_>,
-        handle: &Handle,
-        buf: &mut [u8],
-        pending: Option<rasi::syscall::PendingHandle>,
-    ) -> CancelablePoll<io::Result<usize>> {
-        todo!()
-    }
-
-    fn shutdown(&self, handle: &Handle, how: std::net::Shutdown) -> io::Result<()> {
-        todo!()
-    }
-}
-
-impl HandleContext for TlsSecureUpgrade {
-    fn fmt(&self, handle: &Handle, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
-    }
-
-    fn peer_addr<'a>(&self, handle: &'a Handle) -> &'a Multiaddr {
-        todo!()
-    }
-
-    fn public_key<'a>(&self, handle: &'a Handle) -> Option<&'a identity::PublicKey> {
-        todo!()
-    }
-
-    fn is_server(&self, handle: &Handle) -> bool {
-        todo!()
-    }
-}
-
-impl SecureUpgrade for TlsSecureUpgrade {
-    fn upgrade_client(
-        &self,
-        handle: Handle,
-        transport: std::sync::Arc<Box<dyn Transport>>,
-        keypair: std::sync::Arc<Box<dyn crate::KeypairProvider>>,
-    ) -> io::Result<Handle> {
-        todo!()
-    }
-
-    fn upgrade_server(
-        &self,
-        handle: Handle,
-        transport: std::sync::Arc<Box<dyn Transport>>,
-        keypair: std::sync::Arc<Box<dyn crate::KeypairProvider>>,
-    ) -> io::Result<Handle> {
-        todo!()
-    }
-
-    fn handshake(
-        &self,
-        cx: &mut std::task::Context<'_>,
-        upgrade_handle: &Handle,
-        pending: Option<rasi::syscall::PendingHandle>,
-    ) -> CancelablePoll<io::Result<identity::PublicKey>> {
-        todo!()
     }
 }

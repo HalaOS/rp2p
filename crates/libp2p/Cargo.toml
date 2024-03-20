@@ -23,6 +23,7 @@ rasi = { workspace = true }
 rasi-ext = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
 protobuf = { workspace = true }
+boring = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }

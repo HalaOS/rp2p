@@ -1,5 +1,6 @@
 use std::io;
 
+use boring::error::ErrorStack;
 use multiaddr::Multiaddr;
 use multistream_select::NegotiationError;
 
@@ -40,6 +41,9 @@ pub enum P2pError {
 
     #[error("Ping timeout or mismatched")]
     Ping,
+
+    #[error(transparent)]
+    BoringErrStack(#[from] ErrorStack),
 }
 
 impl From<P2pError> for io::Error {

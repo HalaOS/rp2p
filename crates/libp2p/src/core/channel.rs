@@ -68,7 +68,7 @@ pub trait HandleContext {
     fn is_server(&self, handle: &Handle) -> bool;
 }
 
-pub trait Transport: HandleContext + ChannelIo + Sync + Send {
+pub trait Transport: HandleContext + ChannelIo + Sync + Send + Unpin {
     /// Test if this transport exact match the `addr`.
     fn multiaddr_hint(&self, addr: &Multiaddr) -> bool;
 
@@ -121,7 +121,7 @@ pub trait SecureUpgrade: HandleContext + ChannelIo + Sync + Send {
         cx: &mut Context<'_>,
         upgrade_handle: &Handle,
         pending: Option<PendingHandle>,
-    ) -> CancelablePoll<io::Result<PublicKey>>;
+    ) -> CancelablePoll<io::Result<()>>;
 }
 
 /// A type that upgrade the [`P2pConn`] to support creating muxing bi-directional data stream.
@@ -340,114 +340,5 @@ impl Channel {
         self.upgrader
             .client_conn_upgrade(conn_handle, self.transport.clone(), keypair)
             .await
-    }
-}
-
-/// A helper type to handle p2p connection read/write operations.
-pub struct SwitchConn<C> {
-    pub(super) handle: Arc<Handle>,
-    pub(super) channel: Arc<C>,
-    write_cancel_handle: Option<PendingHandle>,
-    read_cancel_handle: Option<PendingHandle>,
-}
-
-impl<C> From<(Arc<Handle>, Arc<C>)> for SwitchConn<C> {
-    fn from(value: (Arc<Handle>, Arc<C>)) -> Self {
-        Self {
-            handle: value.0,
-            channel: value.1,
-            write_cancel_handle: None,
-            read_cancel_handle: None,
-        }
-    }
-}
-
-impl<C> Debug for SwitchConn<C>
-where
-    C: Deref,
-    C::Target: HandleContext,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.channel.fmt(&self.handle, f)
-    }
-}
-
-impl<C> Clone for SwitchConn<C> {
-    fn clone(&self) -> Self {
-        Self {
-            handle: self.handle.clone(),
-            channel: self.channel.clone(),
-            // Safety: only meaningful in the context of a poll loop.
-            write_cancel_handle: None,
-            // Safety: only meaningful in the context of a poll loop.
-            read_cancel_handle: None,
-        }
-    }
-}
-
-impl<C> AsyncWrite for SwitchConn<C>
-where
-    C: Deref,
-    C::Target: ChannelIo,
-{
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<io::Result<usize>> {
-        let pending = self.write_cancel_handle.take();
-        match self.channel.write(cx, &self.handle, buf, pending) {
-            CancelablePoll::Ready(r) => Poll::Ready(r),
-            CancelablePoll::Pending(cancel) => {
-                self.write_cancel_handle = Some(cancel);
-                Poll::Pending
-            }
-        }
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn poll_close(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> std::task::Poll<io::Result<()>> {
-        self.channel.shutdown(&self.handle, Shutdown::Both)?;
-        std::task::Poll::Ready(Ok(()))
-    }
-}
-
-impl<C> AsyncRead for SwitchConn<C>
-where
-    C: ChannelIo,
-{
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        let pending = self.read_cancel_handle.take();
-        match self.channel.read(cx, &self.handle, buf, pending) {
-            CancelablePoll::Ready(r) => Poll::Ready(r),
-            CancelablePoll::Pending(cancel) => {
-                self.read_cancel_handle = Some(cancel);
-                Poll::Pending
-            }
-        }
-    }
-}
-
-impl<C> SwitchConn<C> {
-    /// Get inner handle.
-    pub fn to_handle(&self) -> Arc<Handle> {
-        self.handle.clone()
-    }
-
-    pub fn to_channel(&self) -> Arc<C> {
-        self.channel.clone()
     }
 }
