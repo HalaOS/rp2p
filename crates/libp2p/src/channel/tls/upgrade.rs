@@ -5,16 +5,27 @@ use std::{
     task::{Context, Waker},
 };
 
-use boring::ssl::{
-    MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream, SslVerifyMode,
+use boring::{
+    conf,
+    ssl::{MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream},
 };
+use identity::PeerId;
 use multiaddr::Multiaddr;
 use rasi::syscall::{CancelablePoll, Handle, PendingHandle};
 use rasi_ext::utils::{Lockable, LockableNew, SpinMutex};
+use rustls::{ClientConfig, ServerConfig};
+use verifier::{Libp2pCertificateVerifier, PROTOCOL_VERSIONS};
 
-use crate::{errors::P2pError, ChannelIo, HandleContext, SecureUpgrade, Transport};
+use crate::{
+    errors::{P2pError, Result},
+    ChannelIo, HandleContext, KeypairProvider, SecureUpgrade, Transport,
+};
 
-use super::utils::to_sockaddr;
+use super::{
+    super::utils::to_sockaddr,
+    cert::{self, tls_cer_gen},
+    verifier,
+};
 
 #[derive(Default)]
 pub struct TlsSecureUpgrade;
@@ -394,4 +405,37 @@ impl SecureUpgrade for TlsSecureUpgrade {
 
         stream.handshake(cx)
     }
+}
+
+const P2P_ALPN: [u8; 6] = *b"libp2p";
+
+/// Create a TLS client configuration for libp2p.
+pub async fn make_client_config(
+    keypair: &dyn KeypairProvider,
+    remote_peer_id: Option<PeerId>,
+) -> Result<rustls::ClientConfig> {
+    let (certificate, private_key) = tls_cer_gen(keypair).await?;
+
+    let mut config = ClientConfig::builder_with_protocol_versions(PROTOCOL_VERSIONS)
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Libp2pCertificateVerifier::with_remote_peer_id(
+            remote_peer_id,
+        )))
+        .with_client_auth_cert(vec![certificate], private_key)?;
+
+    config.alpn_protocols = vec![P2P_ALPN.to_vec()];
+
+    Ok(config)
+}
+
+pub async fn make_server_config(keypair: &dyn KeypairProvider) -> Result<rustls::ServerConfig> {
+    let (certificate, private_key) = tls_cer_gen(keypair).await?;
+
+    let mut config = ServerConfig::builder_with_protocol_versions(PROTOCOL_VERSIONS)
+        .with_client_cert_verifier(Arc::new(Libp2pCertificateVerifier::new()))
+        .with_single_cert(vec![certificate], private_key)?;
+
+    config.alpn_protocols = vec![P2P_ALPN.to_vec()];
+
+    Ok(config)
 }
