@@ -6,20 +6,19 @@ use std::{
 };
 
 use boring::ssl::{MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream};
-use bytes::{Buf, BytesMut};
 use multiaddr::Multiaddr;
 use rasi::syscall::{CancelablePoll, Handle, PendingHandle};
 use rasi_ext::utils::{Lockable, LockableNew, SpinMutex};
 
 use crate::{errors::P2pError, ChannelIo, HandleContext, SecureUpgrade, Transport};
 
+#[derive(Default)]
 pub struct TlsSecureUpgrade;
 
 #[allow(unused)]
 struct TlsBuffer {
     handle: Arc<Handle>,
     transport: std::sync::Arc<Box<dyn Transport>>,
-    send_buf: Option<BytesMut>,
     read_waker: Option<Waker>,
     write_waker: Option<Waker>,
     read_pending: Option<PendingHandle>,
@@ -31,7 +30,6 @@ impl TlsBuffer {
         Self {
             handle,
             transport,
-            send_buf: None,
             read_waker: None,
             write_waker: None,
             read_pending: None,
@@ -58,7 +56,24 @@ impl TlsBuffer {
 #[allow(unused)]
 impl io::Write for TlsBuffer {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        todo!()
+        let waker = self.write_waker.take().unwrap();
+
+        match self.transport.write(
+            &mut Context::from_waker(&waker),
+            &self.handle,
+            buf,
+            self.write_pending.take(),
+        ) {
+            CancelablePoll::Ready(r) => r,
+            CancelablePoll::Pending(write_pending) => {
+                self.write_pending = write_pending;
+
+                Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Transport write pending",
+                ))
+            }
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -79,8 +94,11 @@ impl io::Read for TlsBuffer {
             CancelablePoll::Ready(r) => return r,
             CancelablePoll::Pending(read_pending) => {
                 self.read_pending = read_pending;
-                self.read_waker = Some(read_waker);
-                return Ok(0);
+
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Transport read pending",
+                ));
             }
         }
     }
@@ -249,7 +267,7 @@ impl HandleContext for TlsSecureUpgrade {
         stream.transport.fmt(&stream.handle, f)
     }
 
-    fn peer_addr<'a>(&self, handle: &'a Handle) -> &'a Multiaddr {
+    fn peer_addr(&self, handle: &Handle) -> Multiaddr {
         let stream = handle.downcast::<TlsStream>().expect("Expect TlsStream");
 
         stream.transport.peer_addr(&stream.handle)
@@ -263,6 +281,12 @@ impl HandleContext for TlsSecureUpgrade {
         let stream = handle.downcast::<TlsStream>().expect("Expect TlsStream");
 
         stream.transport.is_server(&stream.handle)
+    }
+
+    fn local_addr(&self, handle: &Handle) -> Multiaddr {
+        let stream = handle.downcast::<TlsStream>().expect("Expect TlsStream");
+
+        stream.transport.local_addr(&stream.handle)
     }
 }
 

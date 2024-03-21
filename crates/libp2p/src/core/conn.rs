@@ -67,7 +67,7 @@ impl P2pConn {
     }
 
     /// Returns peer observed address of this connection.
-    pub fn peer_addr(&self) -> &Multiaddr {
+    pub fn peer_addr(&self) -> Multiaddr {
         self.muxing.peer_addr(&self.handle)
     }
 
@@ -293,7 +293,7 @@ impl P2pStream {
     }
 
     /// Returns peer observed address of this stream.
-    pub fn peer_addr(&self) -> &Multiaddr {
+    pub fn peer_addr(&self) -> Multiaddr {
         self.conn.peer_addr()
     }
 }

@@ -50,7 +50,10 @@ pub trait HandleContext {
     fn fmt(&self, handle: &Handle, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result;
 
     /// Returns the connection's peer [`Multiaddr`] referenced by this handle.
-    fn peer_addr<'a>(&self, handle: &'a Handle) -> &'a Multiaddr;
+    fn peer_addr(&self, handle: &Handle) -> Multiaddr;
+
+    /// Returns the connection's peer [`Multiaddr`] referenced by this handle.
+    fn local_addr(&self, handle: &Handle) -> Multiaddr;
 
     /// Get the peer [`PublicKey`] used to encrypt the connection referenced by this `handle`.
     ///
@@ -81,6 +84,8 @@ pub trait Transport: HandleContext + ChannelIo + Sync + Send + Unpin {
         handle: &Handle,
         pending: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<Handle>>;
+
+    fn listener_local_addr(&self, handle: &Handle) -> io::Result<Multiaddr>;
 
     /// Create a transport connection, and connect to `raddr`.
     fn connect(

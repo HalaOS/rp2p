@@ -8,6 +8,7 @@ use rasi::syscall::{global_network, CancelablePoll, Handle, Network};
 
 use crate::{ChannelIo, HandleContext, Transport};
 
+#[derive(Default)]
 pub struct TcpTransport;
 
 struct TcpStream {
@@ -85,10 +86,16 @@ impl HandleContext for TcpTransport {
         write!(f, "TcpStream {}=>{}", stream.local_addr, stream.peer_addr)
     }
 
-    fn peer_addr<'a>(&self, handle: &'a rasi::syscall::Handle) -> &'a multiaddr::Multiaddr {
+    fn peer_addr(&self, handle: &rasi::syscall::Handle) -> multiaddr::Multiaddr {
         let stream = handle.downcast::<TcpStream>().expect("Expect TcpStream");
 
-        &stream.local_addr
+        stream.local_addr.clone()
+    }
+
+    fn local_addr(&self, handle: &Handle) -> Multiaddr {
+        let stream = handle.downcast::<TcpStream>().expect("Expect TcpStream");
+
+        stream.local_addr.clone()
     }
 
     fn public_key<'a>(
@@ -138,6 +145,18 @@ impl Transport for TcpTransport {
         };
 
         network.tcp_listener_bind(cx.waker().clone(), &[laddr], pending)
+    }
+
+    fn listener_local_addr(&self, handle: &Handle) -> io::Result<Multiaddr> {
+        let network = global_network();
+
+        network.tcp_listener_local_addr(handle).map(|laddr| {
+            let mut local_addr = Multiaddr::from(laddr.ip());
+
+            local_addr.push(Protocol::Tcp(laddr.port()));
+
+            local_addr
+        })
     }
 
     fn accept(

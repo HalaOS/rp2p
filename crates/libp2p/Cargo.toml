@@ -21,6 +21,7 @@ multistream-select = { workspace = true }
 rand = { workspace = true }
 rasi = { workspace = true }
 rasi-ext = { workspace = true }
+rasi-default = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
 protobuf = { workspace = true }
 boring = { workspace = true }
