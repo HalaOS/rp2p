@@ -5,12 +5,16 @@ use std::{
     task::{Context, Waker},
 };
 
-use boring::ssl::{MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream};
+use boring::ssl::{
+    MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream, SslVerifyMode,
+};
 use multiaddr::Multiaddr;
 use rasi::syscall::{CancelablePoll, Handle, PendingHandle};
 use rasi_ext::utils::{Lockable, LockableNew, SpinMutex};
 
 use crate::{errors::P2pError, ChannelIo, HandleContext, SecureUpgrade, Transport};
+
+use super::utils::to_sockaddr;
 
 #[derive(Default)]
 pub struct TlsSecureUpgrade;
@@ -87,7 +91,7 @@ impl io::Write for TlsBuffer {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        todo!()
+        Ok(())
     }
 }
 
@@ -102,6 +106,7 @@ impl io::Read for TlsBuffer {
             self.read_pending.take(),
         ) {
             CancelablePoll::Ready(r) => {
+                self.read_waker = Some(read_waker);
                 log::trace!("TlsBuffer, read: {:?}", r);
                 return r;
             }
@@ -338,8 +343,21 @@ impl SecureUpgrade for TlsSecureUpgrade {
 
         let handle = Arc::new(handle);
 
+        let addr = match to_sockaddr(&transport.peer_addr(&handle)) {
+            Some(addr) => addr,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TlsUpgrade: peer_addr is not a valid tcp/udp address.",
+                ));
+            }
+        };
+
         let handshake = config
-            .setup_connect("", TlsBuffer::new(false, handle.clone(), transport.clone()))
+            .setup_connect(
+                &addr.ip().to_string(),
+                TlsBuffer::new(false, handle.clone(), transport.clone()),
+            )
             .map_err(|err| P2pError::BoringErrStack(err))?;
 
         Ok(Handle::new(TlsStream::new(handle, transport, handshake)))

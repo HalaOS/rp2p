@@ -1,6 +1,6 @@
 use std::io;
 
-use boring::error::ErrorStack;
+use boring::error::{self, ErrorStack};
 use multiaddr::Multiaddr;
 use multistream_select::NegotiationError;
 
@@ -44,6 +44,9 @@ pub enum P2pError {
 
     #[error(transparent)]
     BoringErrStack(#[from] ErrorStack),
+
+    #[error(transparent)]
+    RcGenError(#[from] rcgen::Error),
 }
 
 impl From<P2pError> for io::Error {

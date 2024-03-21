@@ -1,12 +1,11 @@
-use std::{
-    io,
-    net::{IpAddr, SocketAddr},
-};
+use std::io;
 
 use multiaddr::{Multiaddr, Protocol};
 use rasi::syscall::{global_network, CancelablePoll, Handle, Network};
 
 use crate::{ChannelIo, HandleContext, Transport};
+
+use super::utils::to_sockaddr;
 
 #[derive(Default)]
 pub struct TcpTransport;
@@ -17,22 +16,6 @@ struct TcpStream {
     peer_addr: Multiaddr,
     handle: Handle,
     network: &'static dyn Network,
-}
-
-fn to_sockadrr(addr: &Multiaddr) -> Option<SocketAddr> {
-    let mut iter = addr.iter();
-
-    let ip = match iter.next()? {
-        Protocol::Ip4(ip) => IpAddr::from(ip),
-        Protocol::Ip6(ip) => IpAddr::from(ip),
-        _ => return None,
-    };
-
-    if let Protocol::Tcp(port) = iter.next()? {
-        return Some(SocketAddr::new(ip, port));
-    }
-
-    None
 }
 
 impl ChannelIo for TcpTransport {
@@ -134,7 +117,7 @@ impl Transport for TcpTransport {
     ) -> rasi::syscall::CancelablePoll<std::io::Result<rasi::syscall::Handle>> {
         let network = global_network();
 
-        let laddr = match to_sockadrr(laddr) {
+        let laddr = match to_sockaddr(laddr) {
             Some(laddr) => laddr,
             None => {
                 return CancelablePoll::Ready(Err(io::Error::new(
@@ -204,7 +187,7 @@ impl Transport for TcpTransport {
     ) -> rasi::syscall::CancelablePoll<std::io::Result<rasi::syscall::Handle>> {
         let network = global_network();
 
-        let raddr = match to_sockadrr(raddr) {
+        let raddr = match to_sockaddr(raddr) {
             Some(laddr) => laddr,
             None => {
                 return CancelablePoll::Ready(Err(io::Error::new(

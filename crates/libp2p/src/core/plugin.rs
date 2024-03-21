@@ -13,6 +13,13 @@ pub trait KeypairProvider: Sync + Send {
         cx: &mut Context<'_>,
         pending_handle: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<PublicKey>>;
+
+    fn sign(
+        &self,
+        cx: &mut Context<'_>,
+        sign_data: &[u8],
+        pending_handle: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<Vec<u8>>>;
 }
 
 /// Neighbors is a set of libp2p peers, that can be directly connected by switch.

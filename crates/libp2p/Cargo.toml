@@ -25,6 +25,9 @@ rasi-default = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
 protobuf = { workspace = true }
 boring = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+yasna = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }

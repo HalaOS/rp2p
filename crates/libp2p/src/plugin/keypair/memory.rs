@@ -1,3 +1,5 @@
+use std::io;
+
 use identity::Keypair;
 use rasi::syscall::{CancelablePoll, PendingHandle};
 
@@ -26,5 +28,19 @@ impl KeypairProvider for MemoryKeyProvider {
         _: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<identity::PublicKey>> {
         CancelablePoll::Ready(Ok(self.0.public()))
+    }
+
+    fn sign(
+        &self,
+        _cx: &mut std::task::Context<'_>,
+        sign_data: &[u8],
+        _pending_handle: Option<PendingHandle>,
+    ) -> CancelablePoll<std::io::Result<Vec<u8>>> {
+        CancelablePoll::Ready(self.0.sign(sign_data).map_err(|err| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("identity key sign with error: {}", err,),
+            )
+        }))
     }
 }
