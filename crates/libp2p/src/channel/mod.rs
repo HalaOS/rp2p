@@ -17,6 +17,7 @@ mod tests {
 
     #[futures_test::test]
     async fn test_tls() {
+        _ = pretty_env_logger::try_init();
         register_mio_network();
         register_futures_executor().unwrap();
 
@@ -62,6 +63,8 @@ mod tests {
             })
             .await
             .unwrap();
+
+            log::trace!("handshake :{:?}", secure_handle);
         });
 
         let stream_handle = cancelable_would_block(|cx, pending| {
@@ -71,7 +74,7 @@ mod tests {
         .unwrap();
 
         let secure_handle = secure_upgrade
-            .upgrade_server(stream_handle, transport.clone(), keypair.clone())
+            .upgrade_client(stream_handle, transport.clone(), keypair.clone())
             .unwrap();
 
         cancelable_would_block(|cx, pending| secure_upgrade.handshake(cx, &secure_handle, pending))

@@ -235,7 +235,7 @@ impl Transport for TcpTransport {
                 peer_addr.push(Protocol::Tcp(raddr.port()));
 
                 CancelablePoll::Ready(Ok(Handle::new(TcpStream {
-                    is_server: true,
+                    is_server: false,
                     handle: stream_handle,
                     local_addr,
                     peer_addr,

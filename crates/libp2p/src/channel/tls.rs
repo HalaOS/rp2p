@@ -17,6 +17,7 @@ pub struct TlsSecureUpgrade;
 
 #[allow(unused)]
 struct TlsBuffer {
+    is_server: bool,
     handle: Arc<Handle>,
     transport: std::sync::Arc<Box<dyn Transport>>,
     read_waker: Option<Waker>,
@@ -26,8 +27,13 @@ struct TlsBuffer {
 }
 
 impl TlsBuffer {
-    pub fn new(handle: Arc<Handle>, transport: std::sync::Arc<Box<dyn Transport>>) -> Self {
+    pub fn new(
+        is_server: bool,
+        handle: Arc<Handle>,
+        transport: std::sync::Arc<Box<dyn Transport>>,
+    ) -> Self {
         Self {
+            is_server,
             handle,
             transport,
             read_waker: None,
@@ -64,8 +70,12 @@ impl io::Write for TlsBuffer {
             buf,
             self.write_pending.take(),
         ) {
-            CancelablePoll::Ready(r) => r,
+            CancelablePoll::Ready(r) => {
+                log::trace!("TlsBuffer, write: {:?}", r);
+                r
+            }
             CancelablePoll::Pending(write_pending) => {
+                log::trace!("TlsBuffer, write: pending");
                 self.write_pending = write_pending;
 
                 Err(io::Error::new(
@@ -91,8 +101,12 @@ impl io::Read for TlsBuffer {
             buf,
             self.read_pending.take(),
         ) {
-            CancelablePoll::Ready(r) => return r,
+            CancelablePoll::Ready(r) => {
+                log::trace!("TlsBuffer, read: {:?}", r);
+                return r;
+            }
             CancelablePoll::Pending(read_pending) => {
+                log::trace!("TlsBuffer, read: pending");
                 self.read_pending = read_pending;
 
                 return Err(io::Error::new(
@@ -203,17 +217,38 @@ impl TlsStream {
                 handshake.get_mut().register_write(cx.waker().clone());
                 handshake.ssl_mut().set_task_waker(Some(cx.waker().clone()));
 
+                log::trace!(
+                    "server({}), handshake",
+                    self.transport.is_server(&self.handle)
+                );
+
                 match handshake.handshake() {
                     Ok(stream) => {
+                        log::trace!("handshake ok");
                         *state = TlsState::Stream(stream);
 
                         return CancelablePoll::Ready(Ok(()));
                     }
                     Err(boring::ssl::HandshakeError::WouldBlock(handshake)) => {
+                        log::trace!(
+                            "server({}), handshake pending...",
+                            self.transport.is_server(&self.handle)
+                        );
                         *state = TlsState::Handshake(Some(handshake));
                         return CancelablePoll::Pending(None);
                     }
-                    Err(_) => todo!(),
+                    Err(boring::ssl::HandshakeError::Failure(_)) => {
+                        return CancelablePoll::Ready(Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "handshake failed",
+                        )))
+                    }
+                    Err(boring::ssl::HandshakeError::SetupFailure(err_stack)) => {
+                        return CancelablePoll::Ready(Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            err_stack,
+                        )))
+                    }
                 }
             }
         }
@@ -304,7 +339,7 @@ impl SecureUpgrade for TlsSecureUpgrade {
         let handle = Arc::new(handle);
 
         let handshake = config
-            .setup_connect("", TlsBuffer::new(handle.clone(), transport.clone()))
+            .setup_connect("", TlsBuffer::new(false, handle.clone(), transport.clone()))
             .map_err(|err| P2pError::BoringErrStack(err))?;
 
         Ok(Handle::new(TlsStream::new(handle, transport, handshake)))
@@ -323,7 +358,7 @@ impl SecureUpgrade for TlsSecureUpgrade {
         let handle = Arc::new(handle);
 
         let handshake = ssl_acceptor
-            .setup_accept(TlsBuffer::new(handle.clone(), transport.clone()))
+            .setup_accept(TlsBuffer::new(true, handle.clone(), transport.clone()))
             .map_err(|err| P2pError::BoringErrStack(err))?;
 
         Ok(Handle::new(TlsStream::new(handle, transport, handshake)))
