@@ -43,7 +43,7 @@ identity = { version = "^0.2", package = "libp2p-identity" }
 semver = "^1.0"
 multistream-select = "^0.13"
 #tls
-rcgen = "0.12.1"
+rcgen = "^0.12"
 rustls = "0.23.3"
 yasna = "0.5.2"
 x509-parser = "0.16.0"
@@ -51,6 +51,7 @@ der-parser = "9.0.0"
 webpki = "0.22.4"
 oid-registry = "0.7.0"
 futures-rustls = "0.25.1"
+x509-cert = "0.2.5"
 # protobuf
 protobuf-codegen = "3.4.0"
 protoc-bin-vendored = "3.0.0"

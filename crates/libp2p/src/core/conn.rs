@@ -16,7 +16,7 @@ use rasi::{
     utils::cancelable_would_block,
 };
 
-use crate::errors::Result;
+use crate::errors::P2pResult;
 
 use super::{MuxingUpgrade, ProtocolId};
 
@@ -75,7 +75,7 @@ impl P2pConn {
     }
 
     /// Open a outbound stream with suggestion protocols.
-    pub async fn open<P>(&self, protos: P) -> Result<P2pStream>
+    pub async fn open<P>(&self, protos: P) -> P2pResult<P2pStream>
     where
         P: IntoIterator<Item = ProtocolId>,
     {
@@ -92,7 +92,7 @@ impl P2pConn {
     }
 
     /// Accept a newly incoming stream with suggestion protocols.
-    pub async fn accept<P>(&self, protos: P) -> Result<P2pStream>
+    pub async fn accept<P>(&self, protos: P) -> P2pResult<P2pStream>
     where
         P: IntoIterator<Item = ProtocolId>,
     {
@@ -138,7 +138,7 @@ impl SwitchStream {
     pub async fn client_select_protocol(
         self,
         protocols: &[ProtocolId],
-    ) -> Result<(Negotiated<SwitchStream>, ProtocolId)> {
+    ) -> P2pResult<(Negotiated<SwitchStream>, ProtocolId)> {
         let protocols = protocols
             .iter()
             .map(|id| id.to_string())
@@ -153,7 +153,7 @@ impl SwitchStream {
     pub async fn server_select_protocol(
         self,
         protocols: &[ProtocolId],
-    ) -> Result<(Negotiated<SwitchStream>, ProtocolId)> {
+    ) -> P2pResult<(Negotiated<SwitchStream>, ProtocolId)> {
         let protocols = protocols
             .iter()
             .map(|id| id.to_string())

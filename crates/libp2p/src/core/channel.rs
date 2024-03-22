@@ -9,7 +9,7 @@ use rasi::{
     utils::cancelable_would_block,
 };
 
-use crate::{errors::Result, KeypairProvider};
+use crate::{errors::P2pResult, KeypairProvider};
 
 use super::P2pConn;
 
@@ -197,7 +197,7 @@ impl Upgrader {
         handle: Handle,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
-    ) -> Result<P2pConn> {
+    ) -> P2pResult<P2pConn> {
         let handle = Arc::new(handle);
 
         let upgrade_handle = cancelable_would_block(|cx| {
@@ -229,7 +229,7 @@ impl Upgrader {
         handle: Handle,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
-    ) -> Result<P2pConn> {
+    ) -> P2pResult<P2pConn> {
         let handle = Arc::new(handle);
 
         let upgrade_handle = cancelable_would_block(|cx| {
@@ -282,9 +282,9 @@ impl Channel {
         listener: &Handle,
         keypair: Arc<Box<dyn KeypairProvider>>,
         handler: H,
-    ) -> Result<()>
+    ) -> P2pResult<()>
     where
-        H: FnOnce(Result<P2pConn>) -> Fut + Send + Sync + 'static,
+        H: FnOnce(P2pResult<P2pConn>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send,
     {
         let conn_handle = cancelable_would_block(|cx| self.transport.accept(cx, listener)).await?;
@@ -309,7 +309,7 @@ impl Channel {
         &self,
         raddr: &Multiaddr,
         keypair: Arc<Box<dyn KeypairProvider>>,
-    ) -> Result<P2pConn> {
+    ) -> P2pResult<P2pConn> {
         let conn_handle = cancelable_would_block(|cx: &mut Context<'_>| {
             self.transport.connect(cx, raddr, keypair.clone())
         })

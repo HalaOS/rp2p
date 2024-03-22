@@ -15,7 +15,7 @@ use rasi::{executor::spawn, syscall::CancelablePoll, time::sleep};
 use rasi_ext::utils::{AsyncLockable, AsyncSpinMutex};
 
 use crate::{
-    errors::{P2pError, Result},
+    errors::{P2pError, P2pResult},
     ConnPool, P2pConn,
 };
 
@@ -107,7 +107,7 @@ impl AutoPingConnPool {
         self.remove(conn).await;
     }
 
-    async fn ping_loop_inner(conn: P2pConn, duration: Duration) -> Result<()> {
+    async fn ping_loop_inner(conn: P2pConn, duration: Duration) -> P2pResult<()> {
         let mut stream = conn.open(["/ipfs/ping/1.0.0".try_into().unwrap()]).await?;
 
         loop {

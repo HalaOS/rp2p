@@ -12,7 +12,7 @@ use rasi_ext::{
 };
 
 use crate::{
-    errors::{P2pError, Result},
+    errors::{P2pError, P2pResult},
     ConnPool,
 };
 
@@ -72,7 +72,7 @@ pub struct Switch {
 }
 
 impl Switch {
-    async fn connect_inner(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
+    async fn connect_inner(&self, raddrs: &[Multiaddr]) -> P2pResult<P2pConn> {
         let mut last_error = None;
         for raddr in raddrs {
             if let Some(channel) = self.immutable_switch.channel_of_multiaddr(&raddr) {
@@ -116,7 +116,7 @@ impl Switch {
     }
 
     /// Create new connection to `raddrs`.
-    pub async fn connect(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
+    pub async fn connect(&self, raddrs: &[Multiaddr]) -> P2pResult<P2pConn> {
         let p2p_conn = self.connect_inner(raddrs).await?;
 
         identity_request(self.clone(), p2p_conn.clone()).await?;
@@ -150,7 +150,7 @@ impl Switch {
     /// if needed(the peer connection pool is empty).
     ///
     /// Returns [`NeighborRoutePathNotFound`](P2pError::NeighborRoutePathNotFound), if this `peer_id` has no routing information.
-    pub async fn open_stream<P>(&self, peer_id: &PeerId, protos: P) -> Result<P2pStream>
+    pub async fn open_stream<P>(&self, peer_id: &PeerId, protos: P) -> P2pResult<P2pStream>
     where
         P: IntoIterator<Item = ProtocolId>,
     {
@@ -193,7 +193,7 @@ impl Switch {
     }
 
     /// manually update a route for the neighbor peer by [`id`](PeerId).
-    pub async fn neighbors_put(&self, peer_id: PeerId, raddrs: &[Multiaddr]) -> Result<()> {
+    pub async fn neighbors_put(&self, peer_id: PeerId, raddrs: &[Multiaddr]) -> P2pResult<()> {
         Ok(cancelable_would_block(|cx| {
             self.immutable_switch
                 .neighbors
@@ -203,7 +203,7 @@ impl Switch {
     }
 
     /// Returns a copy of route table of one neighbor peer by [`id`](PeerId).
-    pub async fn neighbors_get(&self, peer_id: &PeerId) -> Result<Vec<Multiaddr>> {
+    pub async fn neighbors_get(&self, peer_id: &PeerId) -> P2pResult<Vec<Multiaddr>> {
         Ok(
             cancelable_would_block(|cx| self.immutable_switch.neighbors.neighbors_get(cx, peer_id))
                 .await?,
@@ -211,7 +211,7 @@ impl Switch {
     }
 
     /// remove some route information from neighbor peer by [`id`](PeerId).
-    pub async fn neighbors_delete(&self, peer_id: &PeerId, raddrs: &[Multiaddr]) -> Result<()> {
+    pub async fn neighbors_delete(&self, peer_id: &PeerId, raddrs: &[Multiaddr]) -> P2pResult<()> {
         Ok(cancelable_would_block(|cx| {
             self.immutable_switch
                 .neighbors
@@ -221,7 +221,7 @@ impl Switch {
     }
 
     /// Completely, remove the route table of one neighbor peer by [`id`](PeerId).
-    pub async fn neighbors_delete_all(&self, peer_id: &PeerId) -> Result<()> {
+    pub async fn neighbors_delete_all(&self, peer_id: &PeerId) -> P2pResult<()> {
         Ok(cancelable_would_block(|cx| {
             self.immutable_switch
                 .neighbors
@@ -232,7 +232,7 @@ impl Switch {
 }
 
 impl Switch {
-    async fn start_listener(&self) -> Result<()> {
+    async fn start_listener(&self) -> P2pResult<()> {
         for laddr in &self.immutable_switch.laddrs {
             let channel = self
                 .immutable_switch
@@ -266,7 +266,7 @@ impl Switch {
         channel: Channel,
         listener: Handle,
         laddr: Multiaddr,
-    ) -> Result<()> {
+    ) -> P2pResult<()> {
         loop {
             let this = self.clone();
             let laddr = laddr.clone();
@@ -303,7 +303,7 @@ impl Switch {
         }
     }
 
-    async fn handle_incoming_conn(&self, p2p_conn: P2pConn) -> Result<()> {
+    async fn handle_incoming_conn(&self, p2p_conn: P2pConn) -> P2pResult<()> {
         identity_request(self.clone(), p2p_conn.clone()).await?;
 
         // put the newly connection into peer pool.
@@ -315,7 +315,7 @@ impl Switch {
         Ok(())
     }
 
-    async fn conn_accept_loop(&self, p2p_conn: P2pConn) -> Result<()> {
+    async fn conn_accept_loop(&self, p2p_conn: P2pConn) -> P2pResult<()> {
         loop {
             let mut stream = p2p_conn
                 .accept(self.immutable_switch.protos.clone())
@@ -352,7 +352,7 @@ impl Switch {
         &mut self,
         p2p_conn: P2pConn,
         stream: &mut P2pStream,
-    ) -> Result<bool> {
+    ) -> P2pResult<bool> {
         let protocol_id = stream.protocol_id();
 
         if protocol_id.to_string() == "/ipfs/id/1.0.0" {
@@ -391,7 +391,7 @@ pub struct SwitchBuilder {
     agent_version: String,
     max_identity_packet_len: usize,
     laddrs: Vec<Multiaddr>,
-    protos: Vec<Result<ProtocolId>>,
+    protos: Vec<P2pResult<ProtocolId>>,
     channels: Vec<Channel>,
     keypair: Option<Box<dyn KeypairProvider>>,
     neighbors: Option<Box<dyn NeighborStorage>>,
@@ -473,12 +473,12 @@ impl SwitchBuilder {
     }
 
     /// Consume the `builder` and generate a new [`Switch`] instance.
-    pub async fn create(self) -> Result<Switch> {
+    pub async fn create(self) -> P2pResult<Switch> {
         let protos = ["/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0", "/ipfs/ping/1.0.0"]
             .into_iter()
             .map(|p| p.try_into())
             .chain(self.protos.into_iter())
-            .collect::<Result<HashSet<_>>>()?;
+            .collect::<P2pResult<HashSet<_>>>()?;
 
         #[cfg(feature = "memory_keypair")]
         let keypair = {

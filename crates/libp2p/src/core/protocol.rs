@@ -8,7 +8,7 @@ use rasi_ext::utils::ReadBuf;
 use semver::Version;
 
 use crate::{
-    errors::{P2pError, Result},
+    errors::{P2pError, P2pResult},
     proto::identify::Identify,
     P2pStream,
 };
@@ -124,7 +124,7 @@ impl ProtocolId {
 }
 
 /// client-side use this function to execute identify request.
-pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<()> {
+pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> P2pResult<()> {
     let identify = {
         let mut stream = conn.open(["/ipfs/id/1.0.0".try_into()?]).await?;
 
@@ -157,7 +157,7 @@ pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<()
         .listenAddrs
         .into_iter()
         .map(|buf| Multiaddr::try_from(buf).map_err(Into::into))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<P2pResult<Vec<_>>>()?;
 
     switch.neighbors_put(peer_id, &raddrs).await?;
 
@@ -165,7 +165,7 @@ pub(super) async fn identity_request(switch: Switch, conn: P2pConn) -> Result<()
 }
 
 /// The responsor of identify request.
-pub(super) async fn identity_response(switch: &Switch, stream: &mut P2pStream) -> Result<()> {
+pub(super) async fn identity_response(switch: &Switch, stream: &mut P2pStream) -> P2pResult<()> {
     let mut identity = Identify::new();
 
     identity.set_observedAddr(stream.peer_addr().to_vec());
@@ -188,7 +188,7 @@ pub(super) async fn identity_response(switch: &Switch, stream: &mut P2pStream) -
 }
 
 /// Handle `/ipfs/id/push/1.0.0` request.
-pub(super) async fn identity_push(switch: &mut Switch, stream: &mut P2pStream) -> Result<()> {
+pub(super) async fn identity_push(switch: &mut Switch, stream: &mut P2pStream) -> P2pResult<()> {
     let identify = {
         let mut buf = ReadBuf::with_capacity(switch.immutable_switch.max_identity_packet_len);
 
@@ -209,7 +209,7 @@ pub(super) async fn identity_push(switch: &mut Switch, stream: &mut P2pStream) -
         .listenAddrs
         .into_iter()
         .map(|buf| Multiaddr::try_from(buf).map_err(Into::into))
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<P2pResult<Vec<_>>>()?;
 
     switch.neighbors_put(stream.peer_id(), &raddrs).await?;
 
@@ -217,7 +217,7 @@ pub(super) async fn identity_push(switch: &mut Switch, stream: &mut P2pStream) -
 }
 
 /// Handle `/ipfs/ping/1.0.0` request.
-pub(super) async fn ping_echo(stream: &mut P2pStream) -> Result<()> {
+pub(super) async fn ping_echo(stream: &mut P2pStream) -> P2pResult<()> {
     loop {
         let mut buf = vec![0; 32];
 

@@ -3,7 +3,6 @@ use std::io;
 use boring::error::ErrorStack;
 use multiaddr::Multiaddr;
 use multistream_select::NegotiationError;
-use yasna::ASN1Error;
 
 #[derive(Debug, thiserror::Error)]
 pub enum P2pError {
@@ -45,6 +44,9 @@ pub enum P2pError {
 
     #[error(transparent)]
     BoringErrStack(#[from] ErrorStack),
+
+    #[error(transparent)]
+    RcGenError(#[from] rcgen::Error),
 }
 
 impl From<P2pError> for io::Error {
@@ -56,4 +58,4 @@ impl From<P2pError> for io::Error {
     }
 }
 
-pub type Result<T> = std::result::Result<T, P2pError>;
+pub type P2pResult<T> = std::result::Result<T, P2pError>;

@@ -30,6 +30,7 @@ yasna = { workspace = true }
 x509-parser = { workspace = true }
 der-parser = { workspace = true }
 oid-registry = { workspace = true }
+x509-cert = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }
