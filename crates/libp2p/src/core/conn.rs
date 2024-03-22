@@ -12,7 +12,7 @@ use identity::PeerId;
 use multiaddr::Multiaddr;
 use multistream_select::{dialer_select_proto, listener_select_proto, Negotiated, Version};
 use rasi::{
-    syscall::{CancelablePoll, Handle, PendingHandle},
+    syscall::{CancelablePoll, Handle},
     utils::cancelable_would_block,
 };
 
@@ -82,8 +82,7 @@ impl P2pConn {
         P: IntoIterator<Item = ProtocolId>,
     {
         let stream_handle =
-            cancelable_would_block(|cx, pending| self.muxing.connect(cx, &self.handle, pending))
-                .await?;
+            cancelable_would_block(|cx| self.muxing.connect(cx, &self.handle)).await?;
 
         let stream = SwitchStream::new(self.clone(), stream_handle);
 
@@ -100,8 +99,7 @@ impl P2pConn {
         P: IntoIterator<Item = ProtocolId>,
     {
         let stream_handle =
-            cancelable_would_block(|cx, pending| self.muxing.accept(cx, &self.handle, pending))
-                .await?;
+            cancelable_would_block(|cx| self.muxing.accept(cx, &self.handle)).await?;
 
         let stream = SwitchStream::new(self.clone(), stream_handle);
 
@@ -122,10 +120,10 @@ pub(super) struct SwitchStream {
     stream_handle: Handle,
 
     /// The handle to cancel write ops.
-    write_cancel_handle: Option<PendingHandle>,
+    write_cancel_handle: Option<Handle>,
 
     /// The handle to cancel read ops.
-    read_cancel_handle: Option<PendingHandle>,
+    read_cancel_handle: Option<Handle>,
 }
 
 impl SwitchStream {
@@ -175,12 +173,7 @@ impl AsyncRead for SwitchStream {
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> std::task::Poll<io::Result<usize>> {
-        let pending = self.read_cancel_handle.take();
-        match self
-            .conn
-            .muxing
-            .write(cx, &self.stream_handle, buf, pending)
-        {
+        match self.conn.muxing.write(cx, &self.stream_handle, buf) {
             CancelablePoll::Ready(r) => Poll::Ready(r),
             CancelablePoll::Pending(handle) => {
                 self.read_cancel_handle = handle;
@@ -196,13 +189,7 @@ impl AsyncWrite for SwitchStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<io::Result<usize>> {
-        let pending = self.read_cancel_handle.take();
-
-        match self
-            .conn
-            .muxing
-            .write(cx, &self.stream_handle, buf, pending)
-        {
+        match self.conn.muxing.write(cx, &self.stream_handle, buf) {
             CancelablePoll::Ready(r) => Poll::Ready(r),
             CancelablePoll::Pending(handle) => {
                 self.write_cancel_handle = handle;

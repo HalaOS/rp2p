@@ -3,7 +3,6 @@ use std::io;
 use boring::error::ErrorStack;
 use multiaddr::Multiaddr;
 use multistream_select::NegotiationError;
-use ring::error;
 use yasna::ASN1Error;
 
 #[derive(Debug, thiserror::Error)]

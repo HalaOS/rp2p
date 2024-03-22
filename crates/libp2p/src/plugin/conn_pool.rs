@@ -1,21 +1,17 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
+    pin::pin,
     sync::Arc,
     task::Context,
     time::Duration,
 };
 
-use futures::AsyncReadExt;
+use futures::{AsyncReadExt, Future};
 use identity::PeerId;
 
 use rand::{seq::IteratorRandom, thread_rng, RngCore};
-use rasi::{
-    executor::spawn,
-    poll_cancelable,
-    syscall::{CancelablePoll, PendingHandle},
-    time::sleep,
-};
+use rasi::{executor::spawn, syscall::CancelablePoll, time::sleep};
 use rasi_ext::utils::{AsyncLockable, AsyncSpinMutex};
 
 use crate::{
@@ -139,99 +135,29 @@ impl ConnPool for AutoPingConnPool {
         &self,
         cx: &mut Context<'_>,
         conn: crate::P2pConn,
-        cancel_handle: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<()>> {
-        poll_cancelable!(Put, cx, cancel_handle, || async {
-            Ok(self.put(conn).await)
-        })
+        let put = pin!(self.put(conn));
+
+        put.poll(cx).map(|_| Ok(())).into()
     }
 
     fn get<'a>(
         &self,
         cx: &'a mut Context<'_>,
         peer_id: &'a identity::PeerId,
-        cancel_handle: Option<PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<Option<crate::P2pConn>>> {
-        poll_cancelable!(Get, cx, cancel_handle, || async {
-            Ok(self.get(peer_id).await)
-        })
+        let get = pin!(self.get(peer_id));
+
+        get.poll(cx).map(|r| Ok(r)).into()
     }
 
     fn remove<'a>(
         &'a self,
         cx: &'a mut Context<'_>,
         conn: P2pConn,
-        cancel_handle: Option<PendingHandle>,
     ) -> CancelablePoll<io::Result<()>> {
-        poll_cancelable!(Remove, cx, cancel_handle, || async {
-            Ok(self.remove(conn).await)
-        })
-    }
-}
+        let get = pin!(self.remove(conn));
 
-#[cfg(test)]
-mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
-    use futures_test::task::noop_context;
-    use identity::PeerId;
-    use rasi::{poll_cancelable, syscall::CancelablePoll, utils::cancelable_would_block};
-    use rasi_ext::utils::{AsyncLockable, AsyncSpinMutex};
-
-    use crate::ConnPool;
-
-    use super::AutoPingConnPool;
-
-    #[futures_test::test]
-    async fn test_auto_ping_pool() {
-        let pool: Box<dyn ConnPool> = Box::new(AutoPingConnPool::default());
-
-        let peer_id = PeerId::random();
-
-        let conn =
-            cancelable_would_block(|cx, cancel_handle| pool.get(cx, &peer_id, cancel_handle))
-                .await
-                .unwrap();
-
-        assert!(conn.is_none());
-    }
-
-    #[futures_test::test]
-    async fn test_cancelable() {
-        let mutex = AsyncSpinMutex::new(());
-
-        let pending = None;
-
-        let counter = Arc::new(AtomicUsize::new(0));
-
-        fn lock(
-            pending: Option<rasi::syscall::PendingHandle>,
-            mutex: &AsyncSpinMutex<()>,
-            counter: Arc<AtomicUsize>,
-        ) -> CancelablePoll<()> {
-            poll_cancelable!(Test, &mut noop_context(), pending, || async {
-                counter.fetch_add(1, Ordering::Relaxed);
-                let _ = mutex.lock().await;
-            })
-        }
-
-        let pending = {
-            let _guard = mutex.lock().await;
-
-            let poll = lock(pending, &mutex, counter.clone());
-
-            assert!(poll.is_pending());
-
-            poll.into_pending()
-        };
-
-        let poll = lock(pending, &mutex, counter.clone());
-
-        assert!(poll.is_ready());
-
-        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        get.poll(cx).map(|_| Ok(())).into()
     }
 }

@@ -24,13 +24,12 @@ impl ChannelIo for TcpTransport {
         cx: &mut std::task::Context<'_>,
         handle: &rasi::syscall::Handle,
         buf: &[u8],
-        pending: Option<rasi::syscall::PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<usize>> {
         let stream = handle.downcast::<TcpStream>().expect("Expect TcpStream");
 
         stream
             .network
-            .tcp_stream_write(cx.waker().clone(), &stream.handle, buf, pending)
+            .tcp_stream_write(cx.waker().clone(), &stream.handle, buf)
     }
 
     fn read(
@@ -38,13 +37,12 @@ impl ChannelIo for TcpTransport {
         cx: &mut std::task::Context<'_>,
         handle: &rasi::syscall::Handle,
         buf: &mut [u8],
-        pending: Option<rasi::syscall::PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<usize>> {
         let stream = handle.downcast::<TcpStream>().expect("Expect TcpStream");
 
         stream
             .network
-            .tcp_stream_read(cx.waker().clone(), &stream.handle, buf, pending)
+            .tcp_stream_read(cx.waker().clone(), &stream.handle, buf)
     }
 
     fn shutdown(
@@ -113,7 +111,6 @@ impl Transport for TcpTransport {
         cx: &mut std::task::Context<'_>,
         _keypair: std::sync::Arc<Box<dyn crate::KeypairProvider>>,
         laddr: &multiaddr::Multiaddr,
-        pending: Option<rasi::syscall::PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<rasi::syscall::Handle>> {
         let network = global_network();
 
@@ -127,7 +124,7 @@ impl Transport for TcpTransport {
             }
         };
 
-        network.tcp_listener_bind(cx.waker().clone(), &[laddr], pending)
+        network.tcp_listener_bind(cx.waker().clone(), &[laddr])
     }
 
     fn listener_local_addr(&self, handle: &Handle) -> io::Result<Multiaddr> {
@@ -146,11 +143,10 @@ impl Transport for TcpTransport {
         &self,
         cx: &mut std::task::Context<'_>,
         handle: &rasi::syscall::Handle,
-        pending: Option<rasi::syscall::PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<rasi::syscall::Handle>> {
         let network = global_network();
 
-        match network.tcp_listener_accept(cx.waker().clone(), handle, pending) {
+        match network.tcp_listener_accept(cx.waker().clone(), handle) {
             CancelablePoll::Ready(Ok((stream_handle, raddr))) => {
                 let laddr = match network.tcp_listener_local_addr(handle) {
                     Ok(laddr) => laddr,
@@ -183,7 +179,6 @@ impl Transport for TcpTransport {
         cx: &mut std::task::Context<'_>,
         raddr: &multiaddr::Multiaddr,
         _keypair: std::sync::Arc<Box<dyn crate::KeypairProvider>>,
-        pending: Option<rasi::syscall::PendingHandle>,
     ) -> rasi::syscall::CancelablePoll<std::io::Result<rasi::syscall::Handle>> {
         let network = global_network();
 
@@ -197,7 +192,7 @@ impl Transport for TcpTransport {
             }
         };
 
-        match network.tcp_stream_connect(cx.waker().clone(), &[raddr], pending) {
+        match network.tcp_stream_connect(cx.waker().clone(), &[raddr]) {
             CancelablePoll::Ready(Ok(stream_handle)) => {
                 let laddr = match network.tcp_stream_local_addr(&stream_handle) {
                     Ok(laddr) => laddr,

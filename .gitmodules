@@ -1,0 +1,3 @@
+[submodule "rasi"]
+	path = rasi
+	url = git@github.com:HalaOS/RASI.git
