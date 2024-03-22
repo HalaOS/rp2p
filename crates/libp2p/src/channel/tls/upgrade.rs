@@ -1,19 +1,20 @@
 use std::{
-    io::{self, Read, Write},
+    io::{self, Cursor, Write},
     net::Shutdown,
     sync::Arc,
     task::{Context, Waker},
 };
 
-use boring::{
-    conf,
-    ssl::{MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream},
-};
 use identity::PeerId;
 use multiaddr::Multiaddr;
-use rasi::syscall::{CancelablePoll, Handle, PendingHandle};
+use rasi::{
+    poll_cancelable,
+    syscall::{CancelablePoll, Handle, PendingHandle},
+};
 use rasi_ext::utils::{Lockable, LockableNew, SpinMutex};
-use rustls::{ClientConfig, ServerConfig};
+use rustls::{
+    pki_types::ServerName, ClientConfig, ClientConnection, ServerConfig, ServerConnection,
+};
 use verifier::{Libp2pCertificateVerifier, PROTOCOL_VERSIONS};
 
 use crate::{
@@ -21,14 +22,7 @@ use crate::{
     ChannelIo, HandleContext, KeypairProvider, SecureUpgrade, Transport,
 };
 
-use super::{
-    super::utils::to_sockaddr,
-    cert::{self, tls_cer_gen},
-    verifier,
-};
-
-#[derive(Default)]
-pub struct TlsSecureUpgrade;
+use super::{super::utils::to_sockaddr, cert::tls_cer_gen, verifier};
 
 #[allow(unused)]
 struct TlsBuffer {
@@ -133,143 +127,59 @@ impl io::Read for TlsBuffer {
         }
     }
 }
-enum TlsState {
-    Handshake(Option<MidHandshakeSslStream<TlsBuffer>>),
-    Stream(SslStream<TlsBuffer>),
-}
 
 struct TlsStream {
     handle: Arc<Handle>,
     transport: std::sync::Arc<Box<dyn Transport>>,
-    state: SpinMutex<TlsState>,
+    tls_conn: SpinMutex<(rustls::Connection, TlsBuffer)>,
 }
 
 impl TlsStream {
     pub fn new(
         handle: Arc<Handle>,
         transport: Arc<Box<dyn Transport>>,
-        handshake: MidHandshakeSslStream<TlsBuffer>,
+        tls_conn: rustls::Connection,
+        is_server: bool,
     ) -> Self {
         Self {
             handle,
             transport,
-            state: SpinMutex::new(TlsState::Handshake(Some(handshake))),
+            tls_conn: SpinMutex::new((tls_conn, TlsBuffer::new(is_server, handle, transport))),
         }
     }
 
     pub fn write(&self, cx: &mut Context<'_>, buf: &[u8]) -> CancelablePoll<io::Result<usize>> {
-        let mut state = self.state.lock();
+        let mut tls_conn = self.tls_conn.lock();
 
-        match &mut *state {
-            TlsState::Stream(stream) => {
-                stream.get_mut().register_write(cx.waker().clone());
-                match stream.write(buf) {
-                    Ok(write_size) => {
-                        if write_size == 0 && stream.get_mut().is_write_pending() {
-                            return CancelablePoll::Pending(None);
-                        }
+        let write_size = match tls_conn.0.writer().write(buf) {
+            Ok(write_size) => write_size,
+            Err(err) => return CancelablePoll::Ready(Err(err)),
+        };
 
-                        return CancelablePoll::Ready(Ok(write_size));
-                    }
-                    Err(err) => {
-                        return CancelablePoll::Ready(Err(err));
-                    }
-                }
-            }
-            TlsState::Handshake(_) => CancelablePoll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Call handshake first",
-            ))),
-        }
+        todo!()
     }
 
     pub fn read(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> CancelablePoll<io::Result<usize>> {
-        let mut state = self.state.lock();
+        let mut tls_conn = self.tls_conn.lock();
 
-        match &mut *state {
-            TlsState::Stream(stream) => {
-                stream.get_mut().register_read(cx.waker().clone());
-                match stream.read(buf) {
-                    Ok(write_size) => {
-                        if write_size == 0 && stream.get_mut().is_read_pending() {
-                            return CancelablePoll::Pending(None);
-                        }
-
-                        return CancelablePoll::Ready(Ok(write_size));
-                    }
-                    Err(err) => {
-                        return CancelablePoll::Ready(Err(err));
-                    }
-                }
-            }
-            TlsState::Handshake(_) => CancelablePoll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Call handshake first",
-            ))),
-        }
+        todo!()
     }
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        let mut state = self.state.lock();
+        let mut tls_conn = self.tls_conn.lock();
 
-        match &mut *state {
-            TlsState::Stream(_) => self.transport.shutdown(&self.handle, how),
-            TlsState::Handshake(_) => {
-                Err(io::Error::new(io::ErrorKind::Other, "Call handshake first"))
-            }
-        }
+        todo!()
     }
 
     pub fn handshake(&self, cx: &mut Context<'_>) -> CancelablePoll<io::Result<()>> {
-        let mut state = self.state.lock();
-        match &mut *state {
-            TlsState::Stream(_) => CancelablePoll::Ready(Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Already handshake successfully",
-            ))),
-            TlsState::Handshake(handshake) => {
-                let mut handshake = handshake.take().unwrap();
-                handshake.get_mut().register_read(cx.waker().clone());
-                handshake.get_mut().register_write(cx.waker().clone());
-                handshake.ssl_mut().set_task_waker(Some(cx.waker().clone()));
+        let mut tls_conn = self.tls_conn.lock();
 
-                log::trace!(
-                    "server({}), handshake",
-                    self.transport.is_server(&self.handle)
-                );
-
-                match handshake.handshake() {
-                    Ok(stream) => {
-                        log::trace!("handshake ok");
-                        *state = TlsState::Stream(stream);
-
-                        return CancelablePoll::Ready(Ok(()));
-                    }
-                    Err(boring::ssl::HandshakeError::WouldBlock(handshake)) => {
-                        log::trace!(
-                            "server({}), handshake pending...",
-                            self.transport.is_server(&self.handle)
-                        );
-                        *state = TlsState::Handshake(Some(handshake));
-                        return CancelablePoll::Pending(None);
-                    }
-                    Err(boring::ssl::HandshakeError::Failure(_)) => {
-                        return CancelablePoll::Ready(Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            "handshake failed",
-                        )))
-                    }
-                    Err(boring::ssl::HandshakeError::SetupFailure(err_stack)) => {
-                        return CancelablePoll::Ready(Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            err_stack,
-                        )))
-                    }
-                }
-            }
-        }
+        todo!()
     }
 }
+
+#[derive(Default)]
+pub struct TlsSecureUpgrade;
 
 impl ChannelIo for TlsSecureUpgrade {
     fn write(
@@ -342,57 +252,6 @@ impl HandleContext for TlsSecureUpgrade {
 }
 
 impl SecureUpgrade for TlsSecureUpgrade {
-    fn upgrade_client(
-        &self,
-        handle: Handle,
-        transport: std::sync::Arc<Box<dyn Transport>>,
-        _keypair: std::sync::Arc<Box<dyn crate::KeypairProvider>>,
-    ) -> io::Result<Handle> {
-        let config = SslConnector::builder(SslMethod::tls()).unwrap();
-
-        let config = config.build().configure().unwrap();
-
-        let handle = Arc::new(handle);
-
-        let addr = match to_sockaddr(&transport.peer_addr(&handle)) {
-            Some(addr) => addr,
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "TlsUpgrade: peer_addr is not a valid tcp/udp address.",
-                ));
-            }
-        };
-
-        let handshake = config
-            .setup_connect(
-                &addr.ip().to_string(),
-                TlsBuffer::new(false, handle.clone(), transport.clone()),
-            )
-            .map_err(|err| P2pError::BoringErrStack(err))?;
-
-        Ok(Handle::new(TlsStream::new(handle, transport, handshake)))
-    }
-
-    fn upgrade_server(
-        &self,
-        handle: Handle,
-        transport: std::sync::Arc<Box<dyn Transport>>,
-        _keypair: std::sync::Arc<Box<dyn crate::KeypairProvider>>,
-    ) -> io::Result<Handle> {
-        let builder = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
-
-        let ssl_acceptor = builder.build();
-
-        let handle = Arc::new(handle);
-
-        let handshake = ssl_acceptor
-            .setup_accept(TlsBuffer::new(true, handle.clone(), transport.clone()))
-            .map_err(|err| P2pError::BoringErrStack(err))?;
-
-        Ok(Handle::new(TlsStream::new(handle, transport, handshake)))
-    }
-
     fn handshake(
         &self,
         cx: &mut std::task::Context<'_>,
@@ -404,6 +263,83 @@ impl SecureUpgrade for TlsSecureUpgrade {
             .expect("Expect TlsStream");
 
         stream.handshake(cx)
+    }
+
+    fn upgrade_client(
+        &self,
+        cx: &mut Context<'_>,
+        handle: Arc<Handle>,
+        transport: Arc<Box<dyn Transport>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+        pending: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<Handle>> {
+        let poll = poll_cancelable!(UpgradeClient, cx, pending, || async {
+            make_client_config(&**keypair, None).await
+        });
+
+        let config = match poll {
+            CancelablePoll::Ready(config) => match config {
+                Ok(config) => config,
+                Err(err) => return CancelablePoll::Ready(Err(err.into())),
+            },
+            CancelablePoll::Pending(r) => return CancelablePoll::Pending(r),
+        };
+
+        let addr = match to_sockaddr(&transport.peer_addr(&handle)) {
+            Some(addr) => addr,
+            None => {
+                return CancelablePoll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "TlsUpgrade: peer_addr is not a valid tcp/udp address.",
+                )));
+            }
+        };
+
+        let tls_conn = match ClientConnection::new(
+            Arc::new(config),
+            ServerName::IpAddress(addr.ip().into()),
+        ) {
+            Ok(conn) => conn,
+            Err(err) => return CancelablePoll::Ready(Err(P2pError::RustlsError(err).into())),
+        };
+
+        CancelablePoll::Ready(Ok(Handle::new(TlsStream::new(
+            handle,
+            transport,
+            tls_conn.into(),
+        ))))
+    }
+
+    fn upgrade_server(
+        &self,
+        cx: &mut Context<'_>,
+        handle: Arc<Handle>,
+        transport: Arc<Box<dyn Transport>>,
+        keypair: Arc<Box<dyn KeypairProvider>>,
+        pending: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<Handle>> {
+        let poll = poll_cancelable!(UpgradeClient, cx, pending, || async {
+            make_server_config(&**keypair).await
+        });
+
+        let config = match poll {
+            CancelablePoll::Ready(config) => match config {
+                Ok(config) => config,
+                Err(err) => return CancelablePoll::Ready(Err(err.into())),
+            },
+            CancelablePoll::Pending(r) => return CancelablePoll::Pending(r),
+        };
+
+        let tls_conn = match ServerConnection::new(Arc::new(config)) {
+            Ok(conn) => conn,
+            Err(err) => return CancelablePoll::Ready(Err(P2pError::RustlsError(err).into())),
+        };
+
+        CancelablePoll::Ready(Ok(Handle::new(TlsStream::new(
+            handle,
+            transport,
+            tls_conn.into(),
+        ))))
     }
 }
 

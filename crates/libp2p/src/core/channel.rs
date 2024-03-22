@@ -5,6 +5,7 @@ use identity::PublicKey;
 use multiaddr::Multiaddr;
 use rasi::{
     executor::spawn,
+    future::pending,
     syscall::{CancelablePoll, Handle, PendingHandle},
     utils::cancelable_would_block,
 };
@@ -101,18 +102,22 @@ pub trait SecureUpgrade: HandleContext + ChannelIo + Sync + Send {
     /// Upgrade a client `SwitchConn` to support more features.
     fn upgrade_client(
         &self,
-        handle: Handle,
+        cx: &mut Context<'_>,
+        handle: Arc<Handle>,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
-    ) -> io::Result<Handle>;
+        pending: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<Handle>>;
 
     /// Upgrade a server `SwitchConn` to support more features.
     fn upgrade_server(
         &self,
-        handle: Handle,
+        cx: &mut Context<'_>,
+        handle: Arc<Handle>,
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
-    ) -> io::Result<Handle>;
+        pending: Option<PendingHandle>,
+    ) -> CancelablePoll<io::Result<Handle>>;
 
     fn handshake(
         &self,
@@ -218,9 +223,18 @@ impl Upgrader {
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
-        let upgrade_handle =
-            self.secure_upgrade
-                .upgrade_client(handle, transport, keypair.clone())?;
+        let handle = Arc::new(handle);
+
+        let upgrade_handle = cancelable_would_block(|cx, pending| {
+            self.secure_upgrade.upgrade_client(
+                cx,
+                handle.clone(),
+                transport.clone(),
+                keypair.clone(),
+                pending,
+            )
+        })
+        .await?;
 
         cancelable_would_block(|cx, pending| {
             self.secure_upgrade.handshake(cx, &upgrade_handle, pending)
@@ -248,10 +262,18 @@ impl Upgrader {
         transport: Arc<Box<dyn Transport>>,
         keypair: Arc<Box<dyn KeypairProvider>>,
     ) -> Result<P2pConn> {
-        let upgrade_handle =
-            self.secure_upgrade
-                .upgrade_server(handle, transport, keypair.clone())?;
+        let handle = Arc::new(handle);
 
+        let upgrade_handle = cancelable_would_block(|cx, pending| {
+            self.secure_upgrade.upgrade_server(
+                cx,
+                handle.clone(),
+                transport.clone(),
+                keypair.clone(),
+                pending,
+            )
+        })
+        .await?;
         cancelable_would_block(|cx, pending| {
             self.secure_upgrade.handshake(cx, &upgrade_handle, pending)
         })

@@ -51,13 +51,19 @@ mod tests {
                     .await
                     .unwrap();
 
-            let secure_handle = secure_upgrade_server
-                .upgrade_server(
-                    stream_handle,
+            let stream_handle = Arc::new(stream_handle);
+
+            let secure_handle = cancelable_would_block(|cx, pending| {
+                secure_upgrade_server.upgrade_server(
+                    cx,
+                    stream_handle.clone(),
                     transport_server.clone(),
                     keypair_server.clone(),
+                    pending,
                 )
-                .unwrap();
+            })
+            .await
+            .unwrap();
 
             cancelable_would_block(|cx, pending| {
                 secure_upgrade_server.handshake(cx, &secure_handle, pending)
@@ -74,9 +80,19 @@ mod tests {
         .await
         .unwrap();
 
-        let secure_handle = secure_upgrade
-            .upgrade_client(stream_handle, transport.clone(), keypair.clone())
-            .unwrap();
+        let stream_handle = Arc::new(stream_handle);
+
+        let secure_handle = cancelable_would_block(|cx, pending| {
+            secure_upgrade.upgrade_client(
+                cx,
+                stream_handle.clone(),
+                transport.clone(),
+                keypair.clone(),
+                pending,
+            )
+        })
+        .await
+        .unwrap();
 
         cancelable_would_block(|cx, pending| secure_upgrade.handshake(cx, &secure_handle, pending))
             .await
