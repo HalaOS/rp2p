@@ -5,7 +5,6 @@ use identity::PublicKey;
 use multiaddr::Multiaddr;
 use rasi::{
     executor::spawn,
-    future::pending,
     syscall::{CancelablePoll, Handle, PendingHandle},
     utils::cancelable_would_block,
 };

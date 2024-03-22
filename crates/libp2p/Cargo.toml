@@ -33,6 +33,7 @@ der-parser = { workspace = true }
 webpki = { workspace = true }
 ring = { workspace = true }
 oid-registry = { workspace = true }
+futures-rustls = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }

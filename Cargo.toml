@@ -50,6 +50,7 @@ x509-parser = "0.16.0"
 der-parser = "9.0.0"
 webpki = "0.22.4"
 oid-registry = "0.7.0"
+futures-rustls = "0.25.1"
 # protobuf
 protobuf-codegen = "3.4.0"
 protoc-bin-vendored = "3.0.0"
