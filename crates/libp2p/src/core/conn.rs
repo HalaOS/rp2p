@@ -20,12 +20,10 @@ use crate::errors::Result;
 
 use super::{MuxingUpgrade, ProtocolId};
 
-/// A variant type of switch connections, that can be created by two way:
+/// A variant type of switch connections, that can be created by:
 ///
-/// - A `Transport` service, user may call the [`connect`](super::Transport::connect) function or the [`accept`](super::Transport::accept)
-/// function to create the native transport connection.
-/// - A `XxxUpgrade` service, user may call the [`upgrade_client`](super::Upgrade::upgrade_client) function or
-/// the [`upgrade_server`](super::Upgrade::upgrade_server) function to create the upgraded connection.
+/// - A `MuxingUpgrade` service, user may call the [`upgrade_client`](super::MuxingUpgrade::upgrade_client) function or
+/// the [`upgrade_server`](super::MuxingUpgrade::upgrade_server) function to create the upgraded connection.
 #[derive(Clone)]
 pub struct P2pConn {
     handle: Arc<Handle>,

@@ -14,7 +14,7 @@ use crate::{errors::Result, KeypairProvider};
 use super::P2pConn;
 
 /// A service that provide asynchronous reading/writing functions.
-pub trait ChannelIo: Sync + Send + Unpin {
+pub trait ChannelStream: Sync + Send + Unpin {
     /// Write data via the `connection handle` to peer.
     ///
     /// On success, returns the written data length.
@@ -62,7 +62,7 @@ pub trait HandleContext {
     fn is_server(&self, handle: &Handle) -> bool;
 }
 
-pub trait Transport: HandleContext + ChannelIo + Sync + Send + Unpin {
+pub trait Transport: HandleContext + ChannelStream + Sync + Send + Unpin {
     /// Test if this transport exact match the `addr`.
     fn multiaddr_hint(&self, addr: &Multiaddr) -> bool;
 
@@ -77,6 +77,7 @@ pub trait Transport: HandleContext + ChannelIo + Sync + Send + Unpin {
     /// Accept a newly incoming transport connection.
     fn accept(&self, cx: &mut Context<'_>, handle: &Handle) -> CancelablePoll<io::Result<Handle>>;
 
+    /// Get listener local bound address.
     fn listener_local_addr(&self, handle: &Handle) -> io::Result<Multiaddr>;
 
     /// Create a transport connection, and connect to `raddr`.
@@ -88,7 +89,7 @@ pub trait Transport: HandleContext + ChannelIo + Sync + Send + Unpin {
     ) -> CancelablePoll<io::Result<Handle>>;
 }
 
-pub trait SecureUpgrade: HandleContext + ChannelIo + Sync + Send {
+pub trait SecureUpgrade: HandleContext + ChannelStream + Sync + Send {
     /// Upgrade a client `SwitchConn` to support more features.
     fn upgrade_client(
         &self,

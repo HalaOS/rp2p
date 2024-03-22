@@ -1,14 +1,13 @@
+//! Tcp transport implementation for libp2p framework.
+
 use std::io;
 
 use multiaddr::{Multiaddr, Protocol};
 use rasi::syscall::{global_network, CancelablePoll, Handle, Network};
 
-use crate::{ChannelIo, HandleContext, Transport};
+use crate::{ChannelStream, HandleContext, Transport};
 
 use super::utils::to_sockaddr;
-
-#[derive(Default)]
-pub struct TcpTransport;
 
 struct TcpStream {
     is_server: bool,
@@ -18,7 +17,11 @@ struct TcpStream {
     network: &'static dyn Network,
 }
 
-impl ChannelIo for TcpTransport {
+/// The tcp transport implementation.
+#[derive(Default)]
+pub struct TcpTransport;
+
+impl ChannelStream for TcpTransport {
     fn write(
         &self,
         cx: &mut std::task::Context<'_>,

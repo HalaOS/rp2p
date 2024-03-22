@@ -45,39 +45,6 @@ pub enum P2pError {
 
     #[error(transparent)]
     BoringErrStack(#[from] ErrorStack),
-
-    #[error(transparent)]
-    RcGenError(#[from] rcgen::Error),
-
-    #[error("p2p_ext_oid mismatch.")]
-    BadDer,
-
-    #[error("Libp2p tls handshake error: unsupported critical extension")]
-    UnsupportedCriticalExtension,
-
-    #[error("libp2p-tls requires exactly one certificate")]
-    Libp2pCert,
-
-    #[error(transparent)]
-    X509Error(#[from] x509_parser::error::X509Error),
-
-    #[error(transparent)]
-    ASN1Error(#[from] ASN1Error),
-
-    #[error("WebPKIError: {0}")]
-    WebPKIError(webpki::Error),
-
-    #[error("ring::error::Unspecified")]
-    UnsupportPublicKey,
-
-    #[error(transparent)]
-    RustlsError(#[from] rustls::Error),
-}
-
-impl From<webpki::Error> for P2pError {
-    fn from(value: webpki::Error) -> Self {
-        Self::WebPKIError(value)
-    }
 }
 
 impl From<P2pError> for io::Error {

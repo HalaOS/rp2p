@@ -26,14 +26,10 @@ futures = { workspace = true, features = ["executor"] }
 protobuf = { workspace = true }
 boring = { workspace = true }
 rcgen = { workspace = true }
-rustls = { workspace = true }
 yasna = { workspace = true }
 x509-parser = { workspace = true }
 der-parser = { workspace = true }
-webpki = { workspace = true }
-ring = { workspace = true }
 oid-registry = { workspace = true }
-futures-rustls = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }
