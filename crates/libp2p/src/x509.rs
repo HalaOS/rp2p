@@ -5,7 +5,10 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use const_oid::{db::rfc5912::ECDSA_WITH_SHA_256, AssociatedOid, ObjectIdentifier};
+use const_oid::{
+    db::rfc5912::{ECDSA_WITH_SHA_256, SHA_224_WITH_RSA_ENCRYPTION},
+    AssociatedOid, ObjectIdentifier,
+};
 use der::{asn1::OctetString, Decode, Encode, Sequence};
 use identity::Keypair;
 use p256::ecdsa::{signature::Verifier, DerSignature, SigningKey, VerifyingKey};
