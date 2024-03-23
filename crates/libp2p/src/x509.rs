@@ -5,12 +5,9 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use const_oid::{
-    db::rfc5912::{ECDSA_WITH_SHA_256, SHA_224_WITH_RSA_ENCRYPTION},
-    AssociatedOid, ObjectIdentifier,
-};
+use const_oid::{db::rfc5912::ECDSA_WITH_SHA_256, AssociatedOid, ObjectIdentifier};
 use der::{asn1::OctetString, Decode, Encode, Sequence};
-use identity::Keypair;
+use identity::{Keypair, PeerId};
 use p256::ecdsa::{signature::Verifier, DerSignature, SigningKey, VerifyingKey};
 use rand::{rngs::OsRng, thread_rng, Rng};
 use rasi::utils::cancelable_would_block;
@@ -91,6 +88,25 @@ impl Libp2pExtension {
             signature: OctetString::new(signature)?,
         })
     }
+
+    /// Verify the libp2p public key extension.
+    ///
+    /// On success, returns [`PeerId`] derived from host public key.
+    pub fn verify<PubKey: AsRef<[u8]>>(&self, cert_pub_key: PubKey) -> P2pResult<PeerId> {
+        let mut msg = vec![];
+        msg.extend(P2P_SIGNING_PREFIX);
+        msg.extend(cert_pub_key.as_ref());
+
+        let pub_key = identity::PublicKey::try_decode_protobuf(self.public_key.as_bytes())?;
+
+        if !pub_key.verify(&msg, self.signature.as_bytes()) {
+            return Err(P2pError::Libp2pCert(
+                "Verify libp2p public key extension failed.".into(),
+            ));
+        }
+
+        Ok(pub_key.to_peer_id())
+    }
 }
 
 /// In order to be able to use arbitrary key types, peers don’t use their host key to sign
@@ -136,17 +152,19 @@ pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<(Vec<u8>, Keyp
     Ok((certifacte.to_der()?, cert_keypair))
 }
 
-/// Parse and verify the libp2p certificate from der-encoding format.
-pub fn verify<D: AsRef<[u8]>>(der: D) -> P2pResult<Certificate> {
+/// Parse and verify the libp2p certificate from ASN.1 DER format.
+///
+/// On success, returns the [`PeerId`] extract from [`libp2p public key extension`](https://github.com/libp2p/specs/blob/master/tls/tls.md)
+pub fn verify<D: AsRef<[u8]>>(der: D) -> P2pResult<PeerId> {
     let cert = Certificate::from_der(der.as_ref())?;
-
-    validity(&cert)?;
 
     verify_signature(&cert)?;
 
-    let _extension = extract_libp2p_extension(&cert)?;
+    let extension = extract_libp2p_extension(&cert)?;
 
-    Ok(cert)
+    let cert_pub_key = cert.tbs_certificate.subject_public_key_info.to_der()?;
+
+    Ok(extension.verify(cert_pub_key)?)
 }
 
 // Certificates MUST use the NamedCurve encoding for elliptic curve parameters.
@@ -154,7 +172,9 @@ pub fn verify<D: AsRef<[u8]>>(der: D) -> P2pResult<Certificate> {
 // MUST NOT be used, due to the possibility of collision attacks.
 // In particular, MD5 and SHA1 MUST NOT be used.
 // Endpoints MUST abort the connection attempt if it is not used.
-fn verify_signature(cert: &Certificate) -> P2pResult<()> {
+pub fn verify_signature(cert: &Certificate) -> P2pResult<()> {
+    validity(&cert)?;
+
     match cert.signature_algorithm.oid {
         ECDSA_WITH_SHA_256 => return verify_ecsda_with_sha256_signature(cert),
         oid => {
@@ -250,8 +270,13 @@ mod tests {
     async fn test_cert_gen() {
         let key_provider = MemoryKeyProvider::random();
 
+        let peer_id = cancelable_would_block(|cx| key_provider.public_key(cx))
+            .await
+            .unwrap()
+            .to_peer_id();
+
         let (der, _) = generate(&key_provider).await.unwrap();
 
-        verify(der).unwrap();
+        assert_eq!(verify(der).unwrap(), peer_id);
     }
 }
