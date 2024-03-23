@@ -46,7 +46,16 @@ pub enum P2pError {
     BoringErrStack(#[from] ErrorStack),
 
     #[error(transparent)]
-    RcGenError(#[from] rcgen::Error),
+    SpkiError(#[from] x509_cert::spki::Error),
+
+    #[error(transparent)]
+    X509BuilderError(#[from] x509_cert::builder::Error),
+
+    #[error(transparent)]
+    DerError(#[from] x509_cert::der::Error),
+
+    #[error("The received is not a valid libp2p tls handshake certificate: {0}")]
+    Libp2pCert(String),
 }
 
 impl From<P2pError> for io::Error {

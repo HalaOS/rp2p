@@ -11,7 +11,7 @@ readme = "../../README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 multiaddr = { workspace = true }
-identity = { workspace = true, features = ["ed25519", "rand"] }
+identity = { workspace = true, features = ["ed25519", "ecdsa", "rand"] }
 semver = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -25,12 +25,10 @@ rasi-default = { workspace = true }
 futures = { workspace = true, features = ["executor"] }
 protobuf = { workspace = true }
 boring = { workspace = true }
-rcgen = { workspace = true }
-yasna = { workspace = true }
-x509-parser = { workspace = true }
-der-parser = { workspace = true }
-oid-registry = { workspace = true }
-x509-cert = { workspace = true }
+x509-cert = { workspace = true, features = ["builder", "hazmat"] }
+p256 = { workspace = true, features = ["oid", "arithmetic"] }
+const-oid = { workspace = true }
+der = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }
