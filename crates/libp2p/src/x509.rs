@@ -1,17 +1,14 @@
 //! Utilities for x509 certificate of libp2p
 
 use std::{
-    borrow::Borrow,
     str::FromStr,
     time::{Duration, SystemTime},
 };
 
-use const_oid::{db::rfc5912::ID_EC_PUBLIC_KEY, AssociatedOid, ObjectIdentifier};
+use const_oid::{db::rfc5912::ECDSA_WITH_SHA_256, AssociatedOid, ObjectIdentifier};
 use der::{asn1::OctetString, Decode, Encode, Sequence};
-use p256::{
-    ecdsa::{DerSignature, SigningKey, VerifyingKey},
-    NistP256,
-};
+use identity::Keypair;
+use p256::ecdsa::{signature::Verifier, DerSignature, SigningKey, VerifyingKey};
 use rand::{rngs::OsRng, thread_rng, Rng};
 use rasi::utils::cancelable_would_block;
 use x509_cert::{
@@ -19,7 +16,7 @@ use x509_cert::{
     ext::{AsExtension, Extension},
     name::Name,
     serial_number::SerialNumber,
-    spki::{EncodePublicKey, SubjectPublicKeyInfoOwned},
+    spki::{DecodePublicKey, EncodePublicKey, SubjectPublicKeyInfoOwned},
     time::Validity,
     Certificate,
 };
@@ -102,8 +99,12 @@ impl Libp2pExtension {
 /// or they MAY reuse the same key and certificate for multiple connections.
 ///
 /// The `keypair` is the host key provider.
-pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<Vec<u8>> {
+pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<(Vec<u8>, Keypair)> {
     let signer = p256::SecretKey::random(&mut OsRng);
+
+    let cert_keypair = identity::Keypair::from(identity::ecdsa::Keypair::from(
+        identity::ecdsa::SecretKey::try_from_bytes(signer.to_bytes()).unwrap(),
+    ));
 
     let public_key = signer.public_key();
 
@@ -129,7 +130,7 @@ pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<Vec<u8>> {
 
     let certifacte = builder.build::<DerSignature>()?;
 
-    Ok(certifacte.to_der()?)
+    Ok((certifacte.to_der()?, cert_keypair))
 }
 
 /// Parse and verify the libp2p certificate from der-encoding format.
@@ -152,7 +153,7 @@ pub fn verify<D: AsRef<[u8]>>(der: D) -> P2pResult<Certificate> {
 // Endpoints MUST abort the connection attempt if it is not used.
 fn verify_signature(cert: &Certificate) -> P2pResult<()> {
     match cert.signature_algorithm.oid {
-        ID_EC_PUBLIC_KEY => {}
+        ECDSA_WITH_SHA_256 => return verify_ecsda_with_sha256_signature(cert),
         oid => {
             return Err(P2pError::Libp2pCert(format!(
                 "forbidden signature({})",
@@ -160,12 +161,21 @@ fn verify_signature(cert: &Certificate) -> P2pResult<()> {
             )))
         }
     }
-
-    todo!()
 }
 
-fn get_ec_verifier(cert: &Certificate) -> P2pResult<()> {
-    todo!()
+fn verify_ecsda_with_sha256_signature(cert: &Certificate) -> P2pResult<()> {
+    let input = cert.tbs_certificate.to_der()?;
+
+    let pub_key = cert.tbs_certificate.subject_public_key_info.to_der()?;
+
+    let verify_key = VerifyingKey::from_public_key_der(&pub_key)?;
+
+    let signature =
+        p256::ecdsa::DerSignature::from_bytes(cert.signature.as_bytes().unwrap_or(&[]))?;
+
+    verify_key.verify(&input, &signature)?;
+
+    Ok(())
 }
 
 // be valid at the time it is received by the peer;
@@ -237,7 +247,7 @@ mod tests {
     async fn test_cert_gen() {
         let key_provider = MemoryKeyProvider::random();
 
-        let der = generate(&key_provider).await.unwrap();
+        let (der, _) = generate(&key_provider).await.unwrap();
 
         verify(der).unwrap();
     }

@@ -56,6 +56,9 @@ pub enum P2pError {
 
     #[error("The received is not a valid libp2p tls handshake certificate: {0}")]
     Libp2pCert(String),
+
+    #[error(transparent)]
+    EcdsaSig(#[from] p256::ecdsa::signature::Error),
 }
 
 impl From<P2pError> for io::Error {
