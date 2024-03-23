@@ -29,6 +29,10 @@ x509-cert = { workspace = true, features = ["builder", "hazmat"] }
 p256 = { workspace = true, features = ["oid", "arithmetic"] }
 const-oid = { workspace = true }
 der = { workspace = true }
+rsa = { workspace = true }
+sha2 = { workspace = true, features = ["oid"] }
+p384 = { workspace = true }
+p521 = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }

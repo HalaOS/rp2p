@@ -5,12 +5,21 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use const_oid::{db::rfc5912::ECDSA_WITH_SHA_256, AssociatedOid, ObjectIdentifier};
+use const_oid::{
+    db::rfc5912::{
+        ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ECDSA_WITH_SHA_512, ID_RSASSA_PSS, ID_SHA_256,
+        ID_SHA_384, ID_SHA_512, SHA_256_WITH_RSA_ENCRYPTION, SHA_384_WITH_RSA_ENCRYPTION,
+        SHA_512_WITH_RSA_ENCRYPTION,
+    },
+    AssociatedOid, ObjectIdentifier,
+};
 use der::{asn1::OctetString, Decode, Encode, Sequence};
 use identity::{Keypair, PeerId};
 use p256::ecdsa::{signature::Verifier, DerSignature, SigningKey, VerifyingKey};
 use rand::{rngs::OsRng, thread_rng, Rng};
 use rasi::utils::cancelable_would_block;
+use rsa::pkcs1::RsaPssParams;
+use sha2::{digest::FixedOutputReset, Digest};
 use x509_cert::{
     builder::{Builder, CertificateBuilder, Profile},
     ext::{AsExtension, Extension},
@@ -89,7 +98,7 @@ impl Libp2pExtension {
         })
     }
 
-    /// Verify the libp2p public key extension.
+    /// Verify the libp2p self-signed certificate.
     ///
     /// On success, returns [`PeerId`] derived from host public key.
     pub fn verify<PubKey: AsRef<[u8]>>(&self, cert_pub_key: PubKey) -> P2pResult<PeerId> {
@@ -158,6 +167,8 @@ pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<(Vec<u8>, Keyp
 pub fn verify<D: AsRef<[u8]>>(der: D) -> P2pResult<PeerId> {
     let cert = Certificate::from_der(der.as_ref())?;
 
+    validity(&cert)?;
+
     verify_signature(&cert)?;
 
     let extension = extract_libp2p_extension(&cert)?;
@@ -173,17 +184,75 @@ pub fn verify<D: AsRef<[u8]>>(der: D) -> P2pResult<PeerId> {
 // In particular, MD5 and SHA1 MUST NOT be used.
 // Endpoints MUST abort the connection attempt if it is not used.
 pub fn verify_signature(cert: &Certificate) -> P2pResult<()> {
-    validity(&cert)?;
-
     match cert.signature_algorithm.oid {
-        ECDSA_WITH_SHA_256 => return verify_ecsda_with_sha256_signature(cert),
-        oid => {
-            return Err(P2pError::Libp2pCert(format!(
-                "forbidden signature({})",
-                oid
-            )))
+        ECDSA_WITH_SHA_256 => verify_ecsda_with_sha256_signature(cert),
+        ECDSA_WITH_SHA_384 => verify_ecsda_with_sha384_signature(cert),
+        ECDSA_WITH_SHA_512 => verify_ecsda_with_sha521_signature(cert),
+        SHA_256_WITH_RSA_ENCRYPTION => verify_rsa_pkcs1_signature::<sha2::Sha256>(cert),
+        SHA_384_WITH_RSA_ENCRYPTION => verify_rsa_pkcs1_signature::<sha2::Sha384>(cert),
+        SHA_512_WITH_RSA_ENCRYPTION => verify_rsa_pkcs1_signature::<sha2::Sha512>(cert),
+        ID_RSASSA_PSS => {
+            let params = cert
+                .signature_algorithm
+                .parameters
+                .as_ref()
+                .ok_or(P2pError::Libp2pCert(
+                    "Invalid signature algorithm parameters".into(),
+                ))?
+                .decode_as::<RsaPssParams>()?;
+
+            match params.hash.oid {
+                ID_SHA_256 => verify_rsa_pss_signature::<sha2::Sha256>(cert),
+                ID_SHA_384 => verify_rsa_pss_signature::<sha2::Sha384>(cert),
+                ID_SHA_512 => verify_rsa_pss_signature::<sha2::Sha512>(cert),
+                hash_oid => Err(P2pError::Libp2pCert(format!(
+                    "forbidden signature({}) parameter({})",
+                    cert.signature_algorithm.oid, hash_oid
+                ))),
+            }
         }
+        oid => Err(P2pError::Libp2pCert(format!(
+            "forbidden signature({})",
+            oid
+        ))),
     }
+}
+
+fn verify_rsa_pkcs1_signature<D>(cert: &Certificate) -> P2pResult<()>
+where
+    D: Digest + AssociatedOid,
+{
+    let input = cert.tbs_certificate.to_der()?;
+
+    let pub_key = cert.tbs_certificate.subject_public_key_info.to_der()?;
+
+    let verify_key = rsa::pkcs1v15::VerifyingKey::<D>::from_public_key_der(&pub_key)?;
+
+    let signature = rsa::pkcs1v15::Signature::try_from(cert.signature.as_bytes().unwrap_or(&[]))?;
+
+    verify_key.verify(&input, &signature)?;
+
+    Ok(())
+}
+
+fn verify_rsa_pss_signature<D>(cert: &Certificate) -> P2pResult<()>
+where
+    D: Digest + AssociatedOid + FixedOutputReset,
+{
+    let input = cert.tbs_certificate.to_der()?;
+
+    let pub_key = cert.tbs_certificate.subject_public_key_info.to_der()?;
+
+    println!("verify_rsa_pss_signature: {}", D::OID);
+
+    let verify_key =
+        rsa::pss::VerifyingKey::<D>::new(rsa::RsaPublicKey::from_public_key_der(&pub_key)?);
+
+    let signature = rsa::pss::Signature::try_from(cert.signature.as_bytes().unwrap_or(&[]))?;
+
+    verify_key.verify(&input, &signature)?;
+
+    Ok(())
 }
 
 fn verify_ecsda_with_sha256_signature(cert: &Certificate) -> P2pResult<()> {
@@ -197,6 +266,38 @@ fn verify_ecsda_with_sha256_signature(cert: &Certificate) -> P2pResult<()> {
         p256::ecdsa::DerSignature::from_bytes(cert.signature.as_bytes().unwrap_or(&[]))?;
 
     verify_key.verify(&input, &signature)?;
+
+    Ok(())
+}
+
+fn verify_ecsda_with_sha384_signature(cert: &Certificate) -> P2pResult<()> {
+    let input = cert.tbs_certificate.to_der()?;
+
+    let pub_key = cert.tbs_certificate.subject_public_key_info.to_der()?;
+
+    let verify_key = p384::ecdsa::VerifyingKey::from_public_key_der(&pub_key)?;
+
+    let signature =
+        p384::ecdsa::DerSignature::from_bytes(cert.signature.as_bytes().unwrap_or(&[]))?;
+
+    verify_key.verify(&input, &signature)?;
+
+    Ok(())
+}
+
+fn verify_ecsda_with_sha521_signature(cert: &Certificate) -> P2pResult<()> {
+    let input = cert.tbs_certificate.to_der()?;
+
+    let pub_key = cert.tbs_certificate.subject_public_key_info.to_der()?;
+
+    let verify_key = p521::ecdsa::VerifyingKey::from_sec1_bytes(
+        &p521::PublicKey::from_public_key_der(&pub_key)?.to_sec1_bytes(),
+    )?;
+
+    let signature =
+        p521::ecdsa::DerSignature::from_bytes(cert.signature.as_bytes().unwrap_or(&[]))?;
+
+    verify_key.verify(&input, &signature.try_into()?)?;
 
     Ok(())
 }
@@ -278,5 +379,31 @@ mod tests {
         let (der, _) = generate(&key_provider).await.unwrap();
 
         assert_eq!(verify(der).unwrap(), peer_id);
+    }
+
+    #[test]
+    fn test_verify_signature() {
+        fn check(buf: &[u8]) {
+            let cert = Certificate::from_der(buf).unwrap();
+
+            verify_signature(&cert).unwrap();
+        }
+
+        fn check_failed(buf: &[u8]) {
+            let cert = Certificate::from_der(buf).unwrap();
+
+            verify_signature(&cert).expect_err("must failed");
+        }
+
+        check(include_bytes!("./x509_testdata/rsa_pkcs1_sha256.der"));
+        check(include_bytes!("./x509_testdata/rsa_pkcs1_sha384.der"));
+        check(include_bytes!("./x509_testdata/rsa_pkcs1_sha512.der"));
+        check(include_bytes!("./x509_testdata/nistp256_sha256.der"));
+
+        check_failed(include_bytes!("./x509_testdata/nistp384_sha256.der"));
+
+        check(include_bytes!("./x509_testdata/nistp384_sha384.der"));
+        check(include_bytes!("./x509_testdata/nistp521_sha512.der"));
+        // check(include_bytes!("./x509_testdata/rsa_pss_sha256.der"));
     }
 }
