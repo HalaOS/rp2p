@@ -7,6 +7,7 @@ use std::{
 
 use boring::ssl::{
     ConnectConfiguration, MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream,
+    SslVerifyMode,
 };
 
 use futures::FutureExt;
@@ -422,6 +423,11 @@ async fn make_ssl_acceptor(
 
     builder.set_private_key(&pk)?;
 
+    builder.set_custom_verify_callback(
+        SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
+        |_ssl| Ok(()),
+    );
+
     Ok(builder.build())
 }
 
@@ -439,6 +445,11 @@ async fn make_ssl_connector(
     config.set_certificate(&cert)?;
 
     config.set_private_key(&pk)?;
+
+    config.set_custom_verify_callback(
+        SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
+        |_ssl| Ok(()),
+    );
 
     Ok(config.build().configure()?)
 }

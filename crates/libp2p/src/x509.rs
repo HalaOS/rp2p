@@ -225,7 +225,9 @@ pub fn verify_signature(cert: &Certificate) -> P2pResult<()> {
     }
 }
 
-pub fn to_sec1_der<C>(key: &SecretKey<C>) -> der::Result<Zeroizing<Vec<u8>>>
+/// This function fixes a bug where the output of [`SecretKey::to_sec1_der`]
+/// could not be loaded by [`boring::ec::EcKey::private_key_from_der`].
+fn to_sec1_der<C>(key: &SecretKey<C>) -> der::Result<Zeroizing<Vec<u8>>>
 where
     C: CurveArithmetic + AssociatedOid,
     AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
