@@ -26,7 +26,7 @@ futures = { workspace = true, features = ["executor"] }
 protobuf = { workspace = true }
 boring = { workspace = true }
 x509-cert = { workspace = true, features = ["builder", "hazmat"] }
-p256 = { workspace = true, features = ["arithmetic"] }
+p256 = { workspace = true, features = ["arithmetic", "pkcs8", "pem"] }
 const-oid = { workspace = true }
 der = { workspace = true }
 rsa = { workspace = true }
@@ -34,6 +34,8 @@ sha2 = { workspace = true, features = ["oid"] }
 p384 = { workspace = true }
 p521 = { workspace = true }
 zeroize = { workspace = true }
+pkcs1 = { workspace = true }
+sec1 = { workspace = true }
 
 [dev-dependencies]
 futures-test = { workspace = true }

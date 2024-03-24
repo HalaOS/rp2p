@@ -58,6 +58,15 @@ pub enum P2pError {
     Libp2pCert(String),
 
     #[error(transparent)]
+    Pkcs1Error(#[from] pkcs1::Error),
+
+    #[error(transparent)]
+    Pkcs8Error(#[from] p256::pkcs8::Error),
+
+    #[error(transparent)]
+    EllipticCurve(#[from] p256::elliptic_curve::Error),
+
+    #[error(transparent)]
     EcdsaSig(#[from] p256::ecdsa::signature::Error),
 }
 

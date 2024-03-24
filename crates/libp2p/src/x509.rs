@@ -5,6 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+use ::sec1::{EcParameters, EcPrivateKey};
 use const_oid::{
     db::rfc5912::{
         ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, ECDSA_WITH_SHA_512, ID_RSASSA_PSS, ID_SHA_256,
@@ -15,7 +16,14 @@ use const_oid::{
 };
 use der::{asn1::OctetString, Decode, Encode, Sequence};
 use identity::PeerId;
-use p256::ecdsa::{signature::Verifier, VerifyingKey};
+use p256::elliptic_curve::{sec1::FromEncodedPoint, CurveArithmetic};
+use p256::{
+    ecdsa::{signature::Verifier, VerifyingKey},
+    elliptic_curve::{
+        sec1::{ModulusSize, ToEncodedPoint},
+        AffinePoint, FieldBytesSize, SecretKey,
+    },
+};
 use rand::{rngs::OsRng, thread_rng, Rng};
 use rasi::utils::cancelable_would_block;
 use rsa::pkcs1::RsaPssParams;
@@ -131,9 +139,9 @@ impl Libp2pExtension {
 pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     let signer = p256::SecretKey::random(&mut OsRng);
 
-    let cert_keypair = signer.to_sec1_der()?;
-
     let public_key = signer.public_key();
+
+    let cert_keypair = to_sec1_der(&signer)?;
 
     let signer = p256::ecdsa::SigningKey::from(signer);
 
@@ -215,6 +223,27 @@ pub fn verify_signature(cert: &Certificate) -> P2pResult<()> {
             oid
         ))),
     }
+}
+
+pub fn to_sec1_der<C>(key: &SecretKey<C>) -> der::Result<Zeroizing<Vec<u8>>>
+where
+    C: CurveArithmetic + AssociatedOid,
+    AffinePoint<C>: FromEncodedPoint<C> + ToEncodedPoint<C>,
+    FieldBytesSize<C>: ModulusSize,
+{
+    let private_key_bytes = Zeroizing::new(key.to_bytes());
+    let public_key_bytes = key.public_key().to_encoded_point(false);
+
+    let ec_private_key = Zeroizing::new(
+        EcPrivateKey {
+            private_key: &private_key_bytes,
+            parameters: Some(EcParameters::NamedCurve(C::OID)),
+            public_key: Some(public_key_bytes.as_bytes()),
+        }
+        .to_der()?,
+    );
+
+    Ok(ec_private_key)
 }
 
 fn verify_rsa_pkcs1_signature<D>(cert: &Certificate) -> P2pResult<()>
