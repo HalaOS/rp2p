@@ -155,11 +155,12 @@ impl TlsStream {
                             return CancelablePoll::Pending(None);
                         }
 
-                        return CancelablePoll::Ready(Ok(write_size));
+                        CancelablePoll::Ready(Ok(write_size))
                     }
-                    Err(err) => {
-                        return CancelablePoll::Ready(Err(err));
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        CancelablePoll::Pending(None)
                     }
+                    Err(err) => CancelablePoll::Ready(Err(err)),
                 }
             }
             TlsState::Handshake(_) => CancelablePoll::Ready(Err(io::Error::new(
@@ -181,11 +182,12 @@ impl TlsStream {
                             return CancelablePoll::Pending(None);
                         }
 
-                        return CancelablePoll::Ready(Ok(write_size));
+                        CancelablePoll::Ready(Ok(write_size))
                     }
-                    Err(err) => {
-                        return CancelablePoll::Ready(Err(err));
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        CancelablePoll::Pending(None)
                     }
+                    Err(err) => CancelablePoll::Ready(Err(err)),
                 }
             }
             TlsState::Handshake(_) => CancelablePoll::Ready(Err(io::Error::new(
@@ -229,7 +231,7 @@ impl TlsStream {
                         log::trace!("handshake ok");
                         *state = TlsState::Stream(stream);
 
-                        return CancelablePoll::Ready(Ok(()));
+                        CancelablePoll::Ready(Ok(()))
                     }
                     Err(boring::ssl::HandshakeError::WouldBlock(handshake)) => {
                         log::trace!(
@@ -237,16 +239,13 @@ impl TlsStream {
                             self.transport.is_server(&self.handle)
                         );
                         *state = TlsState::Handshake(Some(handshake));
-                        return CancelablePoll::Pending(None);
+                        CancelablePoll::Pending(None)
                     }
-                    Err(boring::ssl::HandshakeError::Failure(_)) => {
-                        return CancelablePoll::Ready(Err(io::Error::new(
-                            io::ErrorKind::BrokenPipe,
-                            "handshake failed",
-                        )))
-                    }
+                    Err(boring::ssl::HandshakeError::Failure(_)) => CancelablePoll::Ready(Err(
+                        io::Error::new(io::ErrorKind::BrokenPipe, "handshake failed"),
+                    )),
                     Err(boring::ssl::HandshakeError::SetupFailure(err_stack)) => {
-                        return CancelablePoll::Ready(Err(io::Error::new(
+                        CancelablePoll::Ready(Err(io::Error::new(
                             io::ErrorKind::BrokenPipe,
                             err_stack,
                         )))
