@@ -439,7 +439,7 @@ async fn make_ssl_acceptor(
             let peer_id =
                 verify(cert).map_err(|_| SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))?;
 
-            println!("accept client {}", peer_id);
+            log::trace!("ssl_server: verified peer={}", peer_id);
 
             Ok(())
         },
@@ -475,7 +475,7 @@ async fn make_ssl_connector(
         let peer_id =
             verify(cert).map_err(|_| SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))?;
 
-        println!("connect to {}", peer_id);
+        log::trace!("ssl_client: verified peer={}", peer_id);
 
         Ok(())
     });

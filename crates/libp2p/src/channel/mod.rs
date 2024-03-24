@@ -23,7 +23,6 @@ mod tests {
 
     #[futures_test::test]
     async fn test_tls() {
-        _ = pretty_env_logger::try_init();
         register_mio_network();
         register_futures_executor().unwrap();
 
@@ -72,6 +71,16 @@ mod tests {
                 .unwrap();
 
             log::trace!("handshake :{:?}", secure_handle);
+
+            let mut buf = vec![0; 1024];
+
+            let len = cancelable_would_block(|cx| {
+                secure_upgrade_server.read(cx, &secure_handle, &mut buf)
+            })
+            .await
+            .unwrap();
+
+            assert_eq!(&buf[..len], b"hello world");
         });
 
         let stream_handle = Arc::new(
@@ -92,6 +101,10 @@ mod tests {
         .unwrap();
 
         cancelable_would_block(|cx| secure_upgrade.handshake(cx, &secure_handle))
+            .await
+            .unwrap();
+
+        cancelable_would_block(|cx| secure_upgrade.write(cx, &secure_handle, b"hello world"))
             .await
             .unwrap();
     }
