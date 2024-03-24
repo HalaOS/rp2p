@@ -14,8 +14,8 @@ use const_oid::{
     AssociatedOid, ObjectIdentifier,
 };
 use der::{asn1::OctetString, Decode, Encode, Sequence};
-use identity::{Keypair, PeerId};
-use p256::ecdsa::{signature::Verifier, DerSignature, SigningKey, VerifyingKey};
+use identity::PeerId;
+use p256::ecdsa::{signature::Verifier, VerifyingKey};
 use rand::{rngs::OsRng, thread_rng, Rng};
 use rasi::utils::cancelable_would_block;
 use rsa::pkcs1::RsaPssParams;
@@ -29,6 +29,7 @@ use x509_cert::{
     time::Validity,
     Certificate,
 };
+use zeroize::Zeroizing;
 
 use crate::{
     errors::{P2pError, P2pResult},
@@ -127,16 +128,14 @@ impl Libp2pExtension {
 /// or they MAY reuse the same key and certificate for multiple connections.
 ///
 /// The `keypair` is the host key provider.
-pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<(Vec<u8>, Keypair)> {
+pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     let signer = p256::SecretKey::random(&mut OsRng);
 
-    let cert_keypair = identity::Keypair::from(identity::ecdsa::Keypair::from(
-        identity::ecdsa::SecretKey::try_from_bytes(signer.to_bytes()).unwrap(),
-    ));
+    let cert_keypair = signer.to_sec1_der()?;
 
     let public_key = signer.public_key();
 
-    let signer = SigningKey::from(signer);
+    let signer = p256::ecdsa::SigningKey::from(signer);
 
     let serial_number = SerialNumber::from(thread_rng().gen::<u64>());
     let validity = Validity::from_now(Duration::new(5, 0)).unwrap();
@@ -156,7 +155,7 @@ pub async fn generate(keypair: &dyn KeypairProvider) -> P2pResult<(Vec<u8>, Keyp
 
     builder.add_extension(&libp2p_extension)?;
 
-    let certifacte = builder.build::<DerSignature>()?;
+    let certifacte = builder.build::<p256::ecdsa::DerSignature>()?;
 
     Ok((certifacte.to_der()?, cert_keypair))
 }
