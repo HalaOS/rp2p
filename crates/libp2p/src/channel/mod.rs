@@ -44,7 +44,8 @@ mod tests {
 
         let transport_server = transport.clone();
 
-        let keypair_server = keypair.clone();
+        let keypair_server: Arc<Box<dyn KeypairProvider>> =
+            Arc::new(Box::new(MemoryKeyProvider::random()));
 
         let secure_upgrade_server = secure_upgrade.clone();
 

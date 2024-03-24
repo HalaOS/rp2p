@@ -6,8 +6,8 @@ use std::{
 };
 
 use boring::ssl::{
-    ConnectConfiguration, MidHandshakeSslStream, SslAcceptor, SslConnector, SslMethod, SslStream,
-    SslVerifyMode,
+    ConnectConfiguration, MidHandshakeSslStream, SslAcceptor, SslAlert, SslConnector, SslMethod,
+    SslStream, SslVerifyError, SslVerifyMode,
 };
 
 use futures::FutureExt;
@@ -15,7 +15,9 @@ use multiaddr::Multiaddr;
 use rasi::syscall::{CancelablePoll, Handle};
 use rasi_ext::utils::{Lockable, LockableNew, SpinMutex};
 
-use crate::{errors::P2pError, ChannelStream, HandleContext, SecureUpgrade, Transport};
+use crate::{
+    errors::P2pError, x509::verify, ChannelStream, HandleContext, SecureUpgrade, Transport,
+};
 
 use super::utils::to_sockaddr;
 
@@ -425,7 +427,22 @@ async fn make_ssl_acceptor(
 
     builder.set_custom_verify_callback(
         SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
-        |_ssl| Ok(()),
+        |ssl| {
+            let cert = ssl
+                .certificate()
+                .ok_or(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REQUIRED))?;
+
+            let cert = cert
+                .to_der()
+                .map_err(|_| SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))?;
+
+            let peer_id =
+                verify(cert).map_err(|_| SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))?;
+
+            println!("accept client {}", peer_id);
+
+            Ok(())
+        },
     );
 
     Ok(builder.build())
@@ -446,10 +463,22 @@ async fn make_ssl_connector(
 
     config.set_private_key(&pk)?;
 
-    config.set_custom_verify_callback(
-        SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
-        |_ssl| Ok(()),
-    );
+    config.set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
+        let cert = ssl
+            .certificate()
+            .ok_or(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REQUIRED))?;
+
+        let cert = cert
+            .to_der()
+            .map_err(|_| SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))?;
+
+        let peer_id =
+            verify(cert).map_err(|_| SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))?;
+
+        println!("connect to {}", peer_id);
+
+        Ok(())
+    });
 
     Ok(config.build().configure()?)
 }
