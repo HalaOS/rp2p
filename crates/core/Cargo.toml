@@ -1,12 +1,28 @@
 [package]
-description = "Yet another RASI-based libp2p implementation  for the rust language"
-documentation = "https://docs.rs/rasi-libp2p"
+description = "rp2p core infrastructure"
+documentation = "https://docs.rs/rp2p-core"
 edition.workspace = true
 license = "MIT"
-name = "rasi-libp2p"
+name = "rp2p-core"
 repository.workspace = true
 version.workspace = true
 readme = "../../README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
+async-trait = { workspace = true }
+multiaddr = { workspace = true }
+identity = { workspace = true }
+futures = { workspace = true }
+protobuf = { workspace = true }
+semver = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+multistream-select = { workspace = true }
+#rasi
+rasi = { workspace = true }
+rasi-ext = { workspace = true }
+
+[build-dependencies]
+protobuf-codegen = { workspace = true }
+protoc-bin-vendored = { workspace = true }
