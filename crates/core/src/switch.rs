@@ -100,7 +100,7 @@ impl P2pConn {
     }
 
     /// Accept a newly incoming stream with suggestion protocols.
-    pub async fn accept<P, I>(&self, protos: P) -> Result<P2pStream>
+    async fn accept<P, I>(&self, protos: P) -> Result<P2pStream>
     where
         P: IntoIterator<Item = I>,
         I: AsRef<str> + Clone,
