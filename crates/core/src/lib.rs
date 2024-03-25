@@ -1,4 +1,5 @@
 mod transport;
+
 pub use transport::*;
 
 mod switch;
@@ -20,3 +21,6 @@ pub mod proto;
 
 mod errors;
 pub use errors::*;
+
+pub use identity::*;
+pub use multiaddr;

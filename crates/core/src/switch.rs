@@ -136,7 +136,7 @@ impl P2pConn {
 /// # Examples
 ///
 /// ```no_run
-/// ``
+/// ```
 #[derive(Clone)]
 pub struct Switch {
     immutable_switch: Arc<ImmutableSwitch>,

@@ -69,3 +69,7 @@ sec1 = "0.7.3"
 protobuf-codegen = "3.4.0"
 protoc-bin-vendored = "3.0.0"
 protobuf = "3.4.0"
+# libp2p
+rp2p-core = { path = "./crates/core", version = "^0.1" }
+rp2p-x509 = { path = "./crates/x509", version = "^0.1" }
+rp2p-tcp = { path = "./crates/tcp", version = "^0.1" }
