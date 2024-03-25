@@ -1,0 +1,12 @@
+[package]
+description = "Yet another RASI-based libp2p implementation  for the rust language"
+documentation = "https://docs.rs/rasi-libp2p"
+edition.workspace = true
+license = "MIT"
+name = "rasi-libp2p"
+repository.workspace = true
+version.workspace = true
+readme = "../../README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
