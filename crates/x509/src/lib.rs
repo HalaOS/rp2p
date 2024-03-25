@@ -15,7 +15,7 @@ use const_oid::{
     AssociatedOid, ObjectIdentifier,
 };
 use der::{asn1::OctetString, Decode, Encode, Sequence};
-use identity::PeerId;
+use identity::PublicKey;
 use p256::elliptic_curve::{sec1::FromEncodedPoint, CurveArithmetic};
 use p256::{
     ecdsa::{signature::Verifier, VerifyingKey},
@@ -149,7 +149,7 @@ impl Libp2pExtension {
     /// Verify the libp2p self-signed certificate.
     ///
     /// On success, returns [`PeerId`] derived from host public key.
-    pub fn verify<PubKey: AsRef<[u8]>>(&self, cert_pub_key: PubKey) -> Result<PeerId> {
+    pub fn verify<PubKey: AsRef<[u8]>>(&self, cert_pub_key: PubKey) -> Result<PublicKey> {
         let mut msg = vec![];
         msg.extend(P2P_SIGNING_PREFIX);
         msg.extend(cert_pub_key.as_ref());
@@ -162,7 +162,7 @@ impl Libp2pExtension {
             ));
         }
 
-        Ok(pub_key.to_peer_id())
+        Ok(pub_key)
     }
 }
 
@@ -210,7 +210,7 @@ pub async fn generate(keypair: &dyn HostKey) -> Result<(Vec<u8>, Zeroizing<Vec<u
 /// Parse and verify the libp2p certificate from ASN.1 DER format.
 ///
 /// On success, returns the [`PeerId`] extract from [`libp2p public key extension`](https://github.com/libp2p/specs/blob/master/tls/tls.md)
-pub fn verify<D: AsRef<[u8]>>(der: D) -> Result<PeerId> {
+pub fn verify<D: AsRef<[u8]>>(der: D) -> Result<PublicKey> {
     let cert = Certificate::from_der(der.as_ref())?;
 
     validity(&cert)?;

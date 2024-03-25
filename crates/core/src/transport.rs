@@ -44,6 +44,12 @@ pub trait Transport: Sync + Send {
 #[async_trait]
 pub trait Listener: Sync + Send {
     async fn accept(&self) -> io::Result<BoxConnection>;
+
+    /// Returns local bind address.
+    ///
+    /// This can be useful, for example, when binding to port 0 to figure out which port was
+    /// actually bound.
+    fn local_addr(&self) -> io::Result<Multiaddr>;
 }
 
 /// A type that represent a transport layer connection between local and peer.

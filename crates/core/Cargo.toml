@@ -12,7 +12,13 @@ readme = "../../README.md"
 [dependencies]
 async-trait = { workspace = true }
 multiaddr = { workspace = true }
-identity = { workspace = true, features = ["peerid"] }
+identity = { workspace = true, features = [
+    "peerid",
+    "ed25519",
+    "ecdsa",
+    "secp256k1",
+    "rand"
+] }
 futures = { workspace = true }
 protobuf = { workspace = true }
 semver = { workspace = true }

@@ -13,9 +13,14 @@ readme = "../../README.md"
 rp2p-core = { workspace = true }
 rp2p-x509 = { workspace = true }
 async-trait = { workspace = true }
+yamux = { workspace = true }
 #rasi
 rasi = { workspace = true }
 rasi-ext = { workspace = true }
+#utils
+log = { workspace = true }
 
 [dev-dependencies]
 rasi-default = { workspace = true }
+futures-test = { workspace = true }
+pretty_env_logger = { workspace = true }
