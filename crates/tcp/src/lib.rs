@@ -47,10 +47,17 @@ fn to_sockaddr(addr: &Multiaddr) -> Option<SocketAddr> {
 }
 
 #[derive(Default)]
-pub struct P2pTcp(yamux::Config);
+pub struct TcpTransport(yamux::Config);
+
+impl TcpTransport {
+    /// Create new tcp transport with provided [`yamux::Config`]
+    pub fn new(config: yamux::Config) -> Self {
+        Self(config)
+    }
+}
 
 #[async_trait]
-impl Transport for P2pTcp {
+impl Transport for TcpTransport {
     /// Test if this transport support the `laddr`.
     fn multiaddr_hint(&self, laddr: &Multiaddr) -> bool {
         let stack = laddr.protocol_stack().collect::<Vec<_>>();
@@ -349,6 +356,7 @@ impl AsyncRead for P2pTcpStream {
         Pin::new(&mut self.0).poll_read(cx, buf)
     }
 }
+
 #[cfg(test)]
 mod tests {
 
@@ -390,7 +398,7 @@ mod tests {
         register_mio_timer();
         register_futures_executor().unwrap();
 
-        let transport = P2pTcp::default();
+        let transport = TcpTransport::default();
 
         let server_host_key: Arc<BoxHostKey> = Arc::new(Box::new(MockHostKey::default()));
 
