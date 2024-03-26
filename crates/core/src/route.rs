@@ -30,3 +30,5 @@ pub trait RouteTable: Sync + Send + Unpin {
 
 /// A async iterator of multiaddr.
 pub trait MultiaddrIterator: Stream<Item = Multiaddr> + Sync + Sync + Unpin {}
+
+impl<T> MultiaddrIterator for T where T: Stream<Item = Multiaddr> + Sync + Sync + Unpin {}

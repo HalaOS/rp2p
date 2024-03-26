@@ -79,7 +79,12 @@ pub trait Connection: Sync + Send {
     ///
     /// If the connection is dropping or has been dropped, this function will returns `None`.
     async fn accept(&self) -> io::Result<BoxStream>;
+
+    /// Attempt to close this connection.
+    async fn close(&self) -> io::Result<()>;
 }
 
 /// A stream to read/write data between local node and peer.
 pub trait Stream: AsyncWrite + AsyncRead + Sync + Send + Unpin {}
+
+impl<T> Stream for T where T: AsyncWrite + AsyncRead + Sync + Send + Unpin {}

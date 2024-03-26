@@ -4,7 +4,7 @@ use async_trait::async_trait;
 
 /// Another plugin for `Switch`.
 ///
-/// The `HostKey` provider the ability that `Switch` can access the host node keypair ability.
+/// The `HostKey` provider the ability that `Switch` can access the host node keypair.
 ///
 /// thanks to this additional layer of abstraction,
 /// it is possible to extend more different types of key provisioning,

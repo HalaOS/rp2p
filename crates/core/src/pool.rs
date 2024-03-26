@@ -21,6 +21,6 @@ pub trait ConnPool: Sync + Send + Unpin {
     /// Try open one outbound stream via connection by `raddr` in this pool.
     async fn get(&self, peer_id: &PeerId) -> io::Result<Option<P2pConn>>;
 
-    /// Remove one connection from cache pool
+    /// Remove one connection from cache pool.
     async fn remove(&self, conn: P2pConn) -> io::Result<()>;
 }

@@ -1,0 +1,19 @@
+[package]
+description = "ConnPool implementation for rp2p framework"
+documentation = "https://docs.rs/rp2p-conn-pool"
+edition.workspace = true
+license = "MIT"
+name = "rp2p-conn-pool"
+repository.workspace = true
+version.workspace = true
+readme = "../../README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+rp2p-core = { workspace = true }
+async-trait = { workspace = true }
+rasi = { workspace = true }
+rasi-ext = { workspace = true }
+futures = { workspace = true }
+rand = { workspace = true }
+log = { workspace = true }

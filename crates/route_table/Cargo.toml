@@ -1,0 +1,16 @@
+[package]
+description = "RouteTable implementation for rp2p framework"
+documentation = "https://docs.rs/rp2p-route-table"
+edition.workspace = true
+license = "MIT"
+name = "rp2p-route-table"
+repository.workspace = true
+version.workspace = true
+readme = "../../README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+rp2p-core = { workspace = true }
+async-trait = { workspace = true }
+rasi-ext = { workspace = true }
+futures = { workspace = true }

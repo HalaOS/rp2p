@@ -17,6 +17,7 @@ rasi-spec = { path = "rasi/crates/spec", version = "^0.1" }
 log = { version = "^0.4" }
 pretty_env_logger = "^0.5"
 async-trait = "0.1.79"
+clap = "^4.5"
 # rasi deps
 futures = { version = "^0.3" }
 bitmask-enum = "^2.2"
@@ -74,3 +75,6 @@ protobuf = "3.4.0"
 rp2p-core = { path = "./crates/core", version = "^0.1" }
 rp2p-x509 = { path = "./crates/x509", version = "^0.1" }
 rp2p-tcp = { path = "./crates/tcp", version = "^0.1" }
+rp2p-conn-pool = { path = "./crates/conn_pool", version = "^0.1" }
+rp2p-route-table = { path = "./crates/route_table", version = "^0.1" }
+rp2p-hostkey = { path = "./crates/hostkey", version = "^0.1" }

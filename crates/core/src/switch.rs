@@ -1,6 +1,7 @@
 use std::{
     collections::{HashSet, VecDeque},
     fmt::Debug,
+    hash::Hash,
     ops::{Deref, DerefMut},
     sync::Arc,
 };
@@ -18,7 +19,8 @@ use rasi_ext::{
 
 use crate::{
     proto::identify::Identify, BoxConnPool, BoxConnection, BoxHostKey, BoxListener, BoxRouteTable,
-    BoxStream, BoxTransport, Error, HostKey, ProtocolId, Result, RouteTable, Transport,
+    BoxStream, BoxTransport, ConnPool, Connection, Error, HostKey, ProtocolId, Result, RouteTable,
+    Transport,
 };
 
 /// stream type that the libp2p protocol has been negotiated.
@@ -68,13 +70,31 @@ impl Debug for P2pConn {
         write!(
             f,
             "p2p connection, {:?} => {:?}",
-            self.conn.local_addr().unwrap(),
-            self.conn.peer_addr()
+            self.conn.local_addr().unwrap_or(Multiaddr::empty()),
+            self.conn.peer_addr().unwrap_or(Multiaddr::empty())
         )
     }
 }
 
+impl PartialEq for P2pConn {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::addr_eq(self.ptr(), other.ptr())
+    }
+}
+
+impl Eq for P2pConn {}
+
+impl Hash for P2pConn {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ptr().hash(state)
+    }
+}
+
 impl P2pConn {
+    fn ptr(&self) -> *const dyn Connection {
+        &**self.conn
+    }
+
     fn new(conn: BoxConnection) -> Self {
         Self {
             conn: Arc::new(conn),
@@ -125,6 +145,10 @@ impl P2pConn {
 
     pub fn peer_id(&self) -> Result<PeerId> {
         Ok(self.conn.peer_id()?)
+    }
+
+    pub async fn close(&self) -> Result<()> {
+        Ok(self.conn.close().await?)
     }
 }
 
@@ -405,7 +429,13 @@ impl Switch {
             .cache(p2p_conn.clone())
             .await?;
 
-        self.conn_accept_loop(p2p_conn).await?;
+        let r = self.conn_accept_loop(p2p_conn.clone()).await;
+
+        _ = p2p_conn.close().await;
+
+        self.immutable_switch.conn_pool.remove(p2p_conn).await?;
+
+        r?;
 
         Ok(())
     }
@@ -420,12 +450,10 @@ impl Switch {
 
             let mut this = self.clone();
 
-            let p2p_conn = p2p_conn.clone();
-
             let event_map = self.event_map.clone();
 
             spawn(async move {
-                match this.handle_core_protocols(p2p_conn, &mut stream).await {
+                match this.handle_core_protocols(&mut stream).await {
                     Ok(true) => {
                         return;
                     }
@@ -436,6 +464,7 @@ impl Switch {
                             stream.protocol_id(),
                             err
                         );
+
                         return;
                     }
                 }
@@ -447,11 +476,7 @@ impl Switch {
         }
     }
 
-    async fn handle_core_protocols(
-        &mut self,
-        p2p_conn: P2pConn,
-        stream: &mut P2pStream,
-    ) -> Result<bool> {
+    async fn handle_core_protocols(&mut self, stream: &mut P2pStream) -> Result<bool> {
         let protocol_id = stream.protocol_id();
 
         if protocol_id.to_string() == "/ipfs/id/1.0.0" {
@@ -467,19 +492,7 @@ impl Switch {
         }
 
         if protocol_id.to_string() == "/ipfs/ping/1.0.0" {
-            if let Err(err) = core_protocols::ping_echo(stream).await {
-                log::trace!(
-                    "{}, ping echo with error: {}",
-                    p2p_conn.peer_addr().unwrap(),
-                    err
-                );
-
-                // remove connection from pool.
-                self.immutable_switch
-                    .conn_pool
-                    .remove(p2p_conn.clone())
-                    .await?;
-            }
+            core_protocols::ping_echo(stream).await?;
 
             return Ok(true);
         }
@@ -545,13 +558,19 @@ impl SwitchBuilder {
         self
     }
 
-    /// Add a new [`HostKey`] provider for the switch.
+    /// Add a new [`ConnPool`] provider for this switch.
+    pub fn conn_pool<C: ConnPool + 'static>(mut self, conn_pool: C) -> Self {
+        self.conn_pool = Some(Box::new(conn_pool));
+        self
+    }
+
+    /// Add a new [`HostKey`] provider for this switch.
     pub fn host_key<K: HostKey + 'static>(mut self, keypair: K) -> Self {
         self.host_key = Some(Box::new(keypair));
         self
     }
 
-    /// Add a new [`RouteTable`] provider for the switch.
+    /// Add a new [`RouteTable`] provider for this switch.
     pub fn route_table<N: RouteTable + 'static>(mut self, neighbors: N) -> Self {
         self.route_table = Some(Box::new(neighbors));
         self

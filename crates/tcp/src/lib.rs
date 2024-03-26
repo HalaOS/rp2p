@@ -22,7 +22,7 @@ use rasi_ext::{
 use rp2p_core::{
     multiaddr::{Multiaddr, Protocol},
     BoxConnection, BoxHostKey, BoxListener, BoxStream, Connection, Listener, PeerId, PublicKey,
-    Stream, Transport,
+    Transport,
 };
 
 fn to_sockaddr(addr: &Multiaddr) -> Option<SocketAddr> {
@@ -317,11 +317,17 @@ impl Connection for P2pTcpConn {
 
         Ok(Box::new(P2pTcpStream(stream)))
     }
+
+    async fn close(&self) -> io::Result<()> {
+        poll_fn(|cx| self.stream.lock().poll_close(cx))
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+
+        Ok(())
+    }
 }
 
 struct P2pTcpStream(yamux::Stream);
-
-impl Stream for P2pTcpStream {}
 
 impl AsyncWrite for P2pTcpStream {
     fn poll_write(
