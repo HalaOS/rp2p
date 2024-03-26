@@ -178,14 +178,14 @@ impl Transport for TcpTransport {
         let addr =
             to_sockaddr(raddr).ok_or(io::Error::new(io::ErrorKind::Other, "Invalid laddr"))?;
 
-        let stream = TcpStream::connect(addr).await?;
+        let mut stream = TcpStream::connect(addr).await?;
 
         let laddr = stream.local_addr()?;
 
         // dynamic select the secure protocol.
-        let (_, stream) = dialer_select_proto(stream, ["/tls/1.0.0"], Version::V1).await?;
+        let (_, _) = dialer_select_proto(&mut stream, ["/tls/1.0.0"], Version::V1).await?;
 
-        let stream = rasi_ext::net::tls::connect(config, &addr.ip().to_string(), stream)
+        let mut stream = rasi_ext::net::tls::connect(config, &addr.ip().to_string(), stream)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
 
@@ -196,7 +196,7 @@ impl Transport for TcpTransport {
 
         let public_key = rp2p_x509::verify(cert.to_der()?)?;
 
-        let (_, stream) = dialer_select_proto(stream, ["/yamux/1.0.0"], Version::V1).await?;
+        let (_, _) = dialer_select_proto(&mut stream, ["/yamux/1.0.0"], Version::V1).await?;
 
         let stream: BoxStream = Box::new(stream);
 
@@ -237,11 +237,11 @@ impl P2pTcpListener {
 #[async_trait]
 impl Listener for P2pTcpListener {
     async fn accept(&self) -> io::Result<BoxConnection> {
-        let (conn, raddr) = self.listener.accept().await?;
+        let (mut stream, raddr) = self.listener.accept().await?;
 
-        let (_, stream) = listener_select_proto(conn, ["/tls/1.0.0"]).await?;
+        let (_, _) = listener_select_proto(&mut stream, ["/tls/1.0.0"]).await?;
 
-        let stream = rasi_ext::net::tls::accept(&self.ssl_acceptor, stream)
+        let mut stream = rasi_ext::net::tls::accept(&self.ssl_acceptor, stream)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
 
@@ -252,7 +252,7 @@ impl Listener for P2pTcpListener {
 
         let public_key = rp2p_x509::verify(cert.to_der()?)?;
 
-        let (_, stream) = listener_select_proto(stream, ["/yamux/1.0.0"]).await?;
+        let (_, _) = listener_select_proto(&mut stream, ["/yamux/1.0.0"]).await?;
 
         let stream: BoxStream = Box::new(stream);
 

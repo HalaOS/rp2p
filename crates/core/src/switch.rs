@@ -9,7 +9,7 @@ use std::{
 use futures::{AsyncReadExt, AsyncWriteExt, Stream, StreamExt};
 use identity::{PeerId, PublicKey};
 use multiaddr::Multiaddr;
-use multistream_select::{dialer_select_proto, listener_select_proto, Negotiated, Version};
+use multistream_select::{dialer_select_proto, listener_select_proto, Version};
 use protobuf::Message;
 use rasi::executor::spawn;
 use rasi_ext::{
@@ -27,7 +27,7 @@ use crate::{
 pub struct P2pStream {
     protocol_id: ProtocolId,
     conn: P2pConn,
-    stream: Negotiated<BoxStream>,
+    stream: BoxStream,
 }
 
 impl P2pStream {
@@ -47,7 +47,7 @@ impl P2pStream {
 }
 
 impl Deref for P2pStream {
-    type Target = Negotiated<BoxStream>;
+    type Target = BoxStream;
     fn deref(&self) -> &Self::Target {
         &self.stream
     }
@@ -106,9 +106,9 @@ impl P2pConn {
         P: IntoIterator<Item = I>,
         I: AsRef<str>,
     {
-        let stream = self.conn.open().await?;
+        let mut stream = self.conn.open().await?;
 
-        let (protocol_id, stream) = dialer_select_proto(stream, protocols, Version::V1).await?;
+        let (protocol_id, _) = dialer_select_proto(&mut stream, protocols, Version::V1).await?;
 
         let protocol_id = protocol_id.as_ref().to_owned().try_into()?;
 
@@ -125,9 +125,9 @@ impl P2pConn {
         P: IntoIterator<Item = I>,
         I: AsRef<str> + Clone,
     {
-        let stream = self.conn.accept().await?;
+        let mut stream = self.conn.accept().await?;
 
-        let (protocol_id, stream) = listener_select_proto(stream, protos).await?;
+        let (protocol_id, _) = listener_select_proto(&mut stream, protos).await?;
 
         let protocol_id = protocol_id.as_ref().to_owned().try_into()?;
 
