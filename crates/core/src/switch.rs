@@ -305,22 +305,26 @@ impl Switch {
     pub async fn connect(&self, raddrs: &[Multiaddr]) -> Result<P2pConn> {
         let p2p_conn = self.do_connect(raddrs).await?;
 
+        let this = self.clone();
+        let conn = p2p_conn.clone();
+
+        spawn(async move {
+            match this.conn_accept_loop(conn.clone()).await {
+                Ok(_) => log::info!("{:?}, stopped", conn),
+                Err(err) => log::error!("{:?}, stopped with error: {}", conn, err),
+            }
+
+            _ = conn.close().await;
+
+            _ = this.immutable_switch.conn_pool.remove(conn).await;
+        });
+
         core_protocols::identity_request(self.clone(), p2p_conn.clone()).await?;
 
         self.immutable_switch
             .conn_pool
             .cache(p2p_conn.clone())
             .await?;
-
-        let this = self.clone();
-        let conn = p2p_conn.clone();
-
-        spawn(async move {
-            match this.hanle_connection(conn.clone()).await {
-                Ok(_) => log::info!("{:?}, stopped", conn),
-                Err(err) => log::error!("{:?}, stopped with error: {}", conn, err),
-            }
-        });
 
         Ok(p2p_conn)
     }
@@ -661,6 +665,8 @@ mod core_protocols {
 
             loop {
                 let read_size = stream.read(buf.chunk_mut()).await?;
+
+                log::trace!("identity_request recv: {}", read_size);
 
                 if read_size == 0 {
                     break;

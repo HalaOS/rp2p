@@ -41,6 +41,8 @@ pub struct Identify {
     pub observedAddr: ::std::option::Option<::std::vec::Vec<u8>>,
     // @@protoc_insertion_point(field:Identify.protocols)
     pub protocols: ::std::vec::Vec<::std::string::String>,
+    // @@protoc_insertion_point(field:Identify.signedPeerRecord)
+    pub signedPeerRecord: ::std::option::Option<::std::vec::Vec<u8>>,
     // special fields
     // @@protoc_insertion_point(special_field:Identify.special_fields)
     pub special_fields: ::protobuf::SpecialFields,
@@ -201,8 +203,44 @@ impl Identify {
         self.observedAddr.take().unwrap_or_else(|| ::std::vec::Vec::new())
     }
 
+    // optional bytes signedPeerRecord = 8;
+
+    pub fn signedPeerRecord(&self) -> &[u8] {
+        match self.signedPeerRecord.as_ref() {
+            Some(v) => v,
+            None => &[],
+        }
+    }
+
+    pub fn clear_signedPeerRecord(&mut self) {
+        self.signedPeerRecord = ::std::option::Option::None;
+    }
+
+    pub fn has_signedPeerRecord(&self) -> bool {
+        self.signedPeerRecord.is_some()
+    }
+
+    // Param is passed by value, moved
+    pub fn set_signedPeerRecord(&mut self, v: ::std::vec::Vec<u8>) {
+        self.signedPeerRecord = ::std::option::Option::Some(v);
+    }
+
+    // Mutable pointer to the field.
+    // If field is not initialized, it is initialized with default value first.
+    pub fn mut_signedPeerRecord(&mut self) -> &mut ::std::vec::Vec<u8> {
+        if self.signedPeerRecord.is_none() {
+            self.signedPeerRecord = ::std::option::Option::Some(::std::vec::Vec::new());
+        }
+        self.signedPeerRecord.as_mut().unwrap()
+    }
+
+    // Take field
+    pub fn take_signedPeerRecord(&mut self) -> ::std::vec::Vec<u8> {
+        self.signedPeerRecord.take().unwrap_or_else(|| ::std::vec::Vec::new())
+    }
+
     fn generated_message_descriptor_data() -> ::protobuf::reflect::GeneratedMessageDescriptorData {
-        let mut fields = ::std::vec::Vec::with_capacity(6);
+        let mut fields = ::std::vec::Vec::with_capacity(7);
         let mut oneofs = ::std::vec::Vec::with_capacity(0);
         fields.push(::protobuf::reflect::rt::v2::make_option_accessor::<_, _>(
             "protocolVersion",
@@ -233,6 +271,11 @@ impl Identify {
             "protocols",
             |m: &Identify| { &m.protocols },
             |m: &mut Identify| { &mut m.protocols },
+        ));
+        fields.push(::protobuf::reflect::rt::v2::make_option_accessor::<_, _>(
+            "signedPeerRecord",
+            |m: &Identify| { &m.signedPeerRecord },
+            |m: &mut Identify| { &mut m.signedPeerRecord },
         ));
         ::protobuf::reflect::GeneratedMessageDescriptorData::new_2::<Identify>(
             "Identify",
@@ -270,6 +313,9 @@ impl ::protobuf::Message for Identify {
                 26 => {
                     self.protocols.push(is.read_string()?);
                 },
+                66 => {
+                    self.signedPeerRecord = ::std::option::Option::Some(is.read_bytes()?);
+                },
                 tag => {
                     ::protobuf::rt::read_unknown_or_skip_group(tag, is, self.special_fields.mut_unknown_fields())?;
                 },
@@ -300,6 +346,9 @@ impl ::protobuf::Message for Identify {
         for value in &self.protocols {
             my_size += ::protobuf::rt::string_size(3, &value);
         };
+        if let Some(v) = self.signedPeerRecord.as_ref() {
+            my_size += ::protobuf::rt::bytes_size(8, &v);
+        }
         my_size += ::protobuf::rt::unknown_fields_size(self.special_fields.unknown_fields());
         self.special_fields.cached_size().set(my_size as u32);
         my_size
@@ -324,6 +373,9 @@ impl ::protobuf::Message for Identify {
         for v in &self.protocols {
             os.write_string(3, &v)?;
         };
+        if let Some(v) = self.signedPeerRecord.as_ref() {
+            os.write_bytes(8, v)?;
+        }
         os.write_unknown_fields(self.special_fields.unknown_fields())?;
         ::std::result::Result::Ok(())
     }
@@ -347,6 +399,7 @@ impl ::protobuf::Message for Identify {
         self.listenAddrs.clear();
         self.observedAddr = ::std::option::Option::None;
         self.protocols.clear();
+        self.signedPeerRecord = ::std::option::Option::None;
         self.special_fields.clear();
     }
 
@@ -358,6 +411,7 @@ impl ::protobuf::Message for Identify {
             listenAddrs: ::std::vec::Vec::new(),
             observedAddr: ::std::option::Option::None,
             protocols: ::std::vec::Vec::new(),
+            signedPeerRecord: ::std::option::Option::None,
             special_fields: ::protobuf::SpecialFields::new(),
         };
         &instance
@@ -382,12 +436,13 @@ impl ::protobuf::reflect::ProtobufValue for Identify {
 }
 
 static file_descriptor_proto_data: &'static [u8] = b"\
-    \n\x0eidentify.proto\"\xda\x01\n\x08Identify\x12(\n\x0fprotocolVersion\
+    \n\x0eidentify.proto\"\x86\x02\n\x08Identify\x12(\n\x0fprotocolVersion\
     \x18\x05\x20\x01(\tR\x0fprotocolVersion\x12\"\n\x0cagentVersion\x18\x06\
     \x20\x01(\tR\x0cagentVersion\x12\x1c\n\tpublicKey\x18\x01\x20\x01(\x0cR\
     \tpublicKey\x12\x20\n\x0blistenAddrs\x18\x02\x20\x03(\x0cR\x0blistenAddr\
     s\x12\"\n\x0cobservedAddr\x18\x04\x20\x01(\x0cR\x0cobservedAddr\x12\x1c\
-    \n\tprotocols\x18\x03\x20\x03(\tR\tprotocols\
+    \n\tprotocols\x18\x03\x20\x03(\tR\tprotocols\x12*\n\x10signedPeerRecord\
+    \x18\x08\x20\x01(\x0cR\x10signedPeerRecord\
 ";
 
 /// `FileDescriptorProto` object which was a source for this generated file

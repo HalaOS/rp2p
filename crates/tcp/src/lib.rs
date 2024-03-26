@@ -297,7 +297,7 @@ impl P2pTcpConn {
 
         let conn = Arc::new(SpinMutex::new(stream));
 
-        let (mut sx, rx) = mpsc::channel::<BoxStream>(100);
+        let (mut sx, rx) = mpsc::channel::<BoxStream>(0);
 
         let conn_cloned = conn.clone();
 
