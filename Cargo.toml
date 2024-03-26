@@ -21,7 +21,7 @@ clap = "^4.5"
 # rasi deps
 futures = { version = "^0.3" }
 bitmask-enum = "^2.2"
-boring = { version = "^4.4.0", features = ["kx-client-nist-required"] }
+boring = { version = "^4.4.0" }
 quiche = { version = "^0.20.0", features = ["boringssl-boring-crate"] }
 bytes = "^1.5"
 rand = { version = "^0.8", features = ["getrandom"] }

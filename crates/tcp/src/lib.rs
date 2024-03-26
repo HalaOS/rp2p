@@ -6,11 +6,15 @@ use std::{
 };
 
 use async_trait::async_trait;
-use multistream_select::{dialer_select_proto, listener_select_proto, Negotiated, Version};
+use multistream_select::{dialer_select_proto, listener_select_proto, Version};
 use rasi::{
+    channel::mpsc,
+    executor::spawn,
     future::poll_fn,
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
+    sink::SinkExt,
+    stream::StreamExt,
 };
 use rasi_ext::{
     net::tls::{
@@ -19,7 +23,6 @@ use rasi_ext::{
             SslAcceptor, SslAlert, SslConnector, SslMethod, SslVerifyError, SslVerifyMode,
             SslVersion,
         },
-        SslStream,
     },
     utils::{Lockable, LockableNew, SpinMutex},
 };
@@ -186,9 +189,21 @@ impl Transport for TcpTransport {
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
 
+        let cert = stream
+            .ssl()
+            .certificate()
+            .ok_or(io::Error::new(io::ErrorKind::Other, "Handshaking"))?;
+
+        let public_key = rp2p_x509::verify(cert.to_der()?)?;
+
+        let (_, stream) = dialer_select_proto(stream, ["/yamux/1.0.0"], Version::V1).await?;
+
+        let stream: BoxStream = Box::new(stream);
+
         Ok(Box::new(P2pTcpConn::new(
             laddr,
             addr,
+            public_key,
             stream,
             self.0.clone(),
             yamux::Mode::Client,
@@ -230,9 +245,21 @@ impl Listener for P2pTcpListener {
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
 
+        let cert = stream
+            .ssl()
+            .certificate()
+            .ok_or(io::Error::new(io::ErrorKind::Other, "Handshaking"))?;
+
+        let public_key = rp2p_x509::verify(cert.to_der()?)?;
+
+        let (_, stream) = listener_select_proto(stream, ["/yamux/1.0.0"]).await?;
+
+        let stream: BoxStream = Box::new(stream);
+
         Ok(Box::new(P2pTcpConn::new(
             self.laddr,
             raddr,
+            public_key,
             stream,
             self.config.clone(),
             yamux::Mode::Server,
@@ -247,36 +274,58 @@ impl Listener for P2pTcpListener {
     }
 }
 
+type YamuxConn = yamux::Connection<BoxStream>;
+
 struct P2pTcpConn {
     public_key: PublicKey,
     laddr: SocketAddr,
     raddr: SocketAddr,
-    #[allow(unused)]
-    stream: SpinMutex<yamux::Connection<SslStream<Negotiated<TcpStream>>>>,
+    conn: Arc<SpinMutex<YamuxConn>>,
+    incoming: SpinMutex<mpsc::Receiver<BoxStream>>,
 }
 
 impl P2pTcpConn {
     fn new(
         laddr: SocketAddr,
         raddr: SocketAddr,
-        stream: SslStream<Negotiated<TcpStream>>,
+        public_key: PublicKey,
+        stream: BoxStream,
         config: yamux::Config,
         mode: yamux::Mode,
     ) -> io::Result<Self> {
-        let cert = stream
-            .ssl()
-            .certificate()
-            .ok_or(io::Error::new(io::ErrorKind::Other, "Handshaking"))?;
-
-        let public_key = rp2p_x509::verify(cert.to_der()?)?;
-
         let stream = yamux::Connection::new(stream, config, mode);
+
+        let conn = Arc::new(SpinMutex::new(stream));
+
+        let (mut sx, rx) = mpsc::channel::<BoxStream>(100);
+
+        let conn_cloned = conn.clone();
+
+        spawn(async move {
+            loop {
+                match poll_fn(|cx| conn_cloned.lock().poll_next_inbound(cx)).await {
+                    Some(Ok(stream)) => {
+                        if let Err(err) = sx.send(Box::new(P2pTcpStream(stream))).await {
+                            log::error!("yamux send incoming stream with error: {}", err);
+                            break;
+                        }
+                    }
+                    Some(Err(err)) => {
+                        log::error!("yamux poll_next_inbound error: {}", err);
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+        });
 
         Ok(Self {
             laddr,
             raddr,
-            stream: SpinMutex::new(stream),
+            conn,
             public_key,
+            incoming: SpinMutex::new(rx),
         })
     }
 }
@@ -314,7 +363,7 @@ impl Connection for P2pTcpConn {
 
     /// Open a outbound stream for reading/writing via this connection.
     async fn open(&self) -> io::Result<BoxStream> {
-        let stream = poll_fn(|cx| self.stream.lock().poll_new_outbound(cx))
+        let stream = poll_fn(|cx| self.conn.lock().poll_new_outbound(cx))
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
 
@@ -325,16 +374,14 @@ impl Connection for P2pTcpConn {
     ///
     /// If the connection is dropping or has been dropped, this function will returns `None`.
     async fn accept(&self) -> io::Result<BoxStream> {
-        let stream = poll_fn(|cx| self.stream.lock().poll_next_inbound(cx))
-            .await
-            .ok_or(io::Error::new(io::ErrorKind::BrokenPipe, "yamux broken"))?
-            .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
-
-        Ok(Box::new(P2pTcpStream(stream)))
+        self.incoming.lock().next().await.ok_or(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "tcp transport broken",
+        ))
     }
 
     async fn close(&self) -> io::Result<()> {
-        poll_fn(|cx| self.stream.lock().poll_close(cx))
+        poll_fn(|cx| self.conn.lock().poll_close(cx))
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
 
@@ -456,8 +503,6 @@ mod tests {
 
                 assert_eq!(&buf[..read_size], b"hello world");
 
-                let mut stream = conn.open().await.unwrap();
-
                 stream.write_all(&buf[..read_size]).await.unwrap();
             }
         });
@@ -479,8 +524,6 @@ mod tests {
         log::trace!("client write");
 
         stream.flush().await.unwrap();
-
-        let mut stream = conn.accept().await.unwrap();
 
         let mut buf = vec![0; 32];
 
