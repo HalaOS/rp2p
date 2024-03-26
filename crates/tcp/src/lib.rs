@@ -14,7 +14,10 @@ use rasi::{
 use rasi_ext::{
     net::tls::{
         ec, pkey,
-        ssl::{SslAcceptor, SslAlert, SslConnector, SslMethod, SslVerifyError, SslVerifyMode},
+        ssl::{
+            SslAcceptor, SslAlert, SslConnector, SslMethod, SslVerifyError, SslVerifyMode,
+            SslVersion,
+        },
         SslStream,
     },
     utils::{Lockable, LockableNew, SpinMutex},
@@ -78,7 +81,10 @@ impl Transport for TcpTransport {
 
         let pk = pkey::PKey::from_ec_key(ec::EcKey::private_key_from_der(&pk)?)?;
 
-        let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate(SslMethod::tls())?;
+        let mut ssl_acceptor_builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+
+        ssl_acceptor_builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
+        ssl_acceptor_builder.set_min_proto_version(Some(SslVersion::TLS1_3))?;
 
         ssl_acceptor_builder.set_certificate(&cert)?;
 
@@ -141,6 +147,9 @@ impl Transport for TcpTransport {
         config.set_certificate(&cert)?;
 
         config.set_private_key(&pk)?;
+
+        config.set_max_proto_version(Some(SslVersion::TLS1_3))?;
+        config.set_min_proto_version(Some(SslVersion::TLS1_3))?;
 
         config.set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
             let cert = ssl
