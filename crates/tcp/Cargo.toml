@@ -19,6 +19,8 @@ rasi = { workspace = true }
 rasi-ext = { workspace = true }
 #utils
 log = { workspace = true }
+#libp2p
+multistream-select = { workspace = true }
 
 [dev-dependencies]
 rasi-default = { workspace = true }

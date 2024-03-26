@@ -6,6 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use multistream_select::{dialer_select_proto, listener_select_proto, Negotiated, Version};
 use rasi::{
     future::poll_fn,
     io::{AsyncRead, AsyncWrite},
@@ -142,7 +143,7 @@ impl Transport for TcpTransport {
 
         let pk = pkey::PKey::from_ec_key(ec::EcKey::private_key_from_der(&pk)?)?;
 
-        let mut config = SslConnector::builder(SslMethod::tls())?;
+        let mut config = SslConnector::builder(SslMethod::tls_client())?;
 
         config.set_certificate(&cert)?;
 
@@ -177,6 +178,9 @@ impl Transport for TcpTransport {
         let stream = TcpStream::connect(addr).await?;
 
         let laddr = stream.local_addr()?;
+
+        // dynamic select the secure protocol.
+        let (_, stream) = dialer_select_proto(stream, ["/tls/1.0.0"], Version::V1).await?;
 
         let stream = rasi_ext::net::tls::connect(config, &addr.ip().to_string(), stream)
             .await
@@ -220,7 +224,9 @@ impl Listener for P2pTcpListener {
     async fn accept(&self) -> io::Result<BoxConnection> {
         let (conn, raddr) = self.listener.accept().await?;
 
-        let stream = rasi_ext::net::tls::accept(&self.ssl_acceptor, conn)
+        let (_, stream) = listener_select_proto(conn, ["/tls/1.0.0"]).await?;
+
+        let stream = rasi_ext::net::tls::accept(&self.ssl_acceptor, stream)
             .await
             .map_err(|err| io::Error::new(io::ErrorKind::BrokenPipe, err))?;
 
@@ -246,14 +252,14 @@ struct P2pTcpConn {
     laddr: SocketAddr,
     raddr: SocketAddr,
     #[allow(unused)]
-    stream: SpinMutex<yamux::Connection<SslStream<TcpStream>>>,
+    stream: SpinMutex<yamux::Connection<SslStream<Negotiated<TcpStream>>>>,
 }
 
 impl P2pTcpConn {
     fn new(
         laddr: SocketAddr,
         raddr: SocketAddr,
-        stream: SslStream<TcpStream>,
+        stream: SslStream<Negotiated<TcpStream>>,
         config: yamux::Config,
         mode: yamux::Mode,
     ) -> io::Result<Self> {

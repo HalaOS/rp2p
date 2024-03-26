@@ -37,7 +37,7 @@ struct Sniffier {
     bootstrap: Multiaddrs,
 
     /// Use verbose output
-    #[arg(short, long, default_value_t = false)]
+    #[arg(short, long, default_value_t = true)]
     verbose: bool,
 }
 
@@ -47,7 +47,7 @@ fn main() {
     register_futures_executor().unwrap();
 
     if let Err(err) = block_on(sniffier()) {
-        println!("Sniffier exit with error: {}", err);
+        log::error!("Sniffier exit with error: {:#?}", err);
     }
 }
 

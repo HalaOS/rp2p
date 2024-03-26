@@ -187,7 +187,7 @@ pub async fn generate(keypair: &dyn HostKey) -> Result<(Vec<u8>, Zeroizing<Vec<u
     let serial_number = SerialNumber::from(thread_rng().gen::<u64>());
     let validity = Validity::from_now(Duration::new(5, 0)).unwrap();
     let profile = Profile::Manual { issuer: None };
-    let subject = Name::from_str("CN=World domination corporation,O=World domination Inc,C=US")
+    let subject = Name::from_str("CN=libp2p domination corporation,O=libp2p domination Inc,C=US")
         .unwrap()
         .to_der()
         .unwrap();
