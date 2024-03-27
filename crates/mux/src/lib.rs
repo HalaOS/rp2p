@@ -167,4 +167,12 @@ impl YamuxSession {
     pub fn stream_recv(&mut self, stream_id: u32, buf: &mut [u8]) -> Result<(usize, bool)> {
         todo!()
     }
+
+    /// To hard close a stream immediately.
+    ///
+    /// This operation my trigger queueing of control messages (e.g. Window Update) with the RST flag.
+    /// send() should be called after close.
+    pub fn stream_close(&mut self, stream_id: u32) -> Result<()> {
+        todo!()
+    }
 }
