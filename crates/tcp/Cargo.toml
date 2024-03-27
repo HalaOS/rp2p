@@ -16,7 +16,7 @@ async-trait = { workspace = true }
 yamux = { workspace = true }
 #rasi
 rasi = { workspace = true }
-rasi-ext = { workspace = true }
+rasi-ext = { workspace = true, default-features = false, features = ["tls"] }
 #utils
 log = { workspace = true }
 #libp2p

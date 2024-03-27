@@ -1,16 +1,14 @@
 [package]
-description = "RouteTable implementation for rp2p framework"
-documentation = "https://docs.rs/rp2p-route-table"
+description = " Implementation of yamux and other libp2p stream multiplexer specs"
+documentation = "https://docs.rs/rp2p-mux"
 edition.workspace = true
 license = "MIT"
-name = "rp2p-route-table"
+name = "rp2p-mux"
 repository.workspace = true
 version.workspace = true
 readme = "../../README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-rp2p-core = { workspace = true }
-async-trait = { workspace = true }
-rasi-ext = { workspace = true, default-features = false }
 futures = { workspace = true }
+rasi-ext = { workspace = true, default-features = false }

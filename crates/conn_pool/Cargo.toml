@@ -13,7 +13,7 @@ readme = "../../README.md"
 rp2p-core = { workspace = true }
 async-trait = { workspace = true }
 rasi = { workspace = true }
-rasi-ext = { workspace = true }
+rasi-ext = { workspace = true, default-features = false }
 futures = { workspace = true }
 rand = { workspace = true }
 log = { workspace = true }

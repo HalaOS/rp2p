@@ -27,7 +27,9 @@ log = { workspace = true }
 multistream-select = { workspace = true }
 #rasi
 rasi = { workspace = true }
-rasi-ext = { workspace = true }
+rasi-ext = { workspace = true, default-features = false, features = [
+    "event_map"
+] }
 
 [build-dependencies]
 protobuf-codegen = { workspace = true }

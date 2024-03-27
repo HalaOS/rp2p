@@ -450,6 +450,8 @@ impl Switch {
                 .accept(self.immutable_switch.protos.clone())
                 .await?;
 
+            log::trace!("accept new stream,{:?}", stream.protocol_id());
+
             let mutable_switch = self.mutable_switch.clone();
 
             let mut this = self.clone();

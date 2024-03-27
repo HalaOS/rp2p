@@ -19,7 +19,7 @@ rp2p-hostkey = { workspace = true }
 
 [dev-dependencies]
 rasi = { workspace = true }
-rasi-ext = { workspace = true }
+rasi-ext = { workspace = true, default-features = false }
 rasi-default = { workspace = true }
 pretty_env_logger = { workspace = true }
 clap = { workspace = true, features = ["derive"] }

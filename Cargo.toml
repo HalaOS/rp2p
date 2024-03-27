@@ -9,7 +9,7 @@ version = "0.1.0"
 
 [workspace.dependencies]
 rasi = { path = "rasi/crates/rasi", version = "^0.1" }
-rasi-ext = { path = "rasi/crates/ext", version = "^0.1" }
+rasi-ext = { path = "rasi/crates/ext", version = "^0.1", default-features = false }
 rasi-default = { path = "rasi/crates/default", version = "^0.1" }
 rasi-syscall = { path = "rasi/crates/syscall", version = "^0.1" }
 rasi-spec = { path = "rasi/crates/spec", version = "^0.1" }
