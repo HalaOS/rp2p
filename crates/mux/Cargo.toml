@@ -12,3 +12,5 @@ readme = "../../README.md"
 [dependencies]
 futures = { workspace = true }
 rasi-ext = { workspace = true, default-features = false }
+bitmask-enum = { workspace = true }
+thiserror = { workspace = true }

@@ -14,7 +14,7 @@ use rasi::{
 use rasi_ext::utils::{AsyncLockable, AsyncSpinMutex};
 use rp2p_core::{ConnPool, P2pConn, PeerId};
 
-/// A [`ConnPool`](rp2p_core::ConnPool) implementation with auto liveness check support.
+/// A [`ConnPool`] implementation with auto liveness check support.
 pub struct ConnPoolWithPing {
     ping_duration: Duration,
     peers: AsyncSpinMutex<HashMap<PeerId, HashSet<P2pConn>>>,

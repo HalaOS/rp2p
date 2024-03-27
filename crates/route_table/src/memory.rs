@@ -1,4 +1,4 @@
-//! A [`RouteTable`](rp2p_core::RouteTable) implementation for test purposes.
+//! A [`RouteTable`] implementation for test purposes.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -10,7 +10,7 @@ use futures::stream;
 use rasi_ext::utils::{AsyncLockable, AsyncSpinMutex};
 use rp2p_core::{multiaddr::Multiaddr, BoxMultiaddrIterator, PeerId, RouteTable};
 
-/// A [`RouteTable`](rp2p_core::RouteTable) implementation that stores all data in memory.
+/// A [`RouteTable`] implementation that stores all data in memory.
 #[derive(Default)]
 pub struct MemoryRouteTable(AsyncSpinMutex<HashMap<PeerId, HashSet<Multiaddr>>>);
 
@@ -30,7 +30,7 @@ impl RouteTable for MemoryRouteTable {
     }
     /// Get peer's listener address.
     ///
-    /// On success, returns a asynchronous [`Stream`] of listener's addresses.
+    /// On success, returns a asynchronous `Stream` of listener's addresses.
     async fn get(&self, peer_id: &PeerId) -> io::Result<Option<BoxMultiaddrIterator>> {
         let map = self.0.lock().await;
 

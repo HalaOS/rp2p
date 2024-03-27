@@ -1,4 +1,4 @@
-//! A [`HostKey`](rp2p_core::HostKey) implementation for test purposes.
+//! A [`HostKey`] implementation for test purposes.
 
 use std::io;
 

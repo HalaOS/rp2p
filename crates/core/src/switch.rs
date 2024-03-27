@@ -159,8 +159,6 @@ impl P2pConn {
 ///
 /// # Examples
 ///
-/// ```no_run
-/// ```
 #[derive(Clone)]
 pub struct Switch {
     immutable_switch: Arc<ImmutableSwitch>,
@@ -279,7 +277,7 @@ impl Switch {
     /// This function will call [`connect`](Self::connect) to create a new connection,
     /// if needed(the peer connection pool is empty).
     ///
-    /// Returns [`NeighborRoutePathNotFound`](P2pError::NeighborRoutePathNotFound), if this `peer_id` has no routing information.
+    /// Returns [`RouteError`](Error::RouteError), if this `peer_id` has no routing information.
     pub async fn open_stream<P, I>(&self, peer_id: &PeerId, protos: P) -> Result<P2pStream>
     where
         P: IntoIterator<Item = I>,
