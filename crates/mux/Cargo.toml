@@ -1,5 +1,5 @@
 [package]
-description = " Implementation of yamux and other libp2p stream multiplexer specs"
+description = "A proper implementation of the yamux protocol"
 documentation = "https://docs.rs/rp2p-mux"
 edition.workspace = true
 license = "MIT"
