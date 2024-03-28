@@ -275,17 +275,22 @@ impl<'a> Frame<'a> {
             return Err(Error::BufferTooShort(frame_len as u32));
         }
 
-        Ok((
-            Frame {
-                header,
-                body: if frame_len == 12 {
-                    None
-                } else {
-                    Some(Cow::Borrowed(&buf[12..frame_len]))
-                },
-            },
-            frame_len,
-        ))
+        let frame_type = header.frame_type()?;
+
+        let body = if frame_type == FrameType::Data {
+            if frame_len == 12 {
+                return Err(Error::InvalidFrame(InvalidFrameKind::Body));
+            }
+
+            Some(Cow::Borrowed(&buf[12..frame_len]))
+        } else {
+            if frame_len != 12 {
+                return Err(Error::InvalidFrame(InvalidFrameKind::Body));
+            }
+            None
+        };
+
+        Ok((Frame { header, body }, frame_len))
     }
 }
 

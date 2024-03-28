@@ -1,11 +1,11 @@
 use std::{
     cmp::min,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
 };
 
 use bitmask_enum::bitmask;
 
-use crate::{ring_buf::RingBuf, Error, Frame, Result};
+use crate::{ring_buf::RingBuf, Error, Flags, Frame, InvalidFrameKind, Result};
 
 /// The send buf of stream state.
 struct SendBuf {
@@ -202,6 +202,12 @@ impl Stream {
     fn is_fin(&self) -> bool {
         !self.state.contains(StreamState::READ)
     }
+
+    fn update_flags(&mut self, flags: Flags) {}
+
+    fn update_window_size(&mut self, delta: u32) {
+        self.send_buf.window_size += delta;
+    }
 }
 
 /// When a session is being terminated, the Go Away message should be sent.
@@ -212,22 +218,139 @@ pub enum Reason {
     Normal,
     ProtocolError,
     InternalError,
+    Unknown(u8),
 }
 
-enum SendFrame {}
+impl From<u8> for Reason {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Normal,
+            1 => Self::ProtocolError,
+            2 => Self::InternalError,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl Into<u8> for Reason {
+    fn into(self) -> u8 {
+        match self {
+            Reason::Normal => 0,
+            Reason::ProtocolError => 1,
+            Reason::InternalError => 2,
+            Reason::Unknown(c) => c,
+        }
+    }
+}
+
+enum SendFrame {
+    /// Send DATA_FRAME, associated datas are stream_id and flags.
+    Data(u32, Flags),
+    /// Send PING_FRAME, associated data is opaque value.
+    Ping(u32),
+    /// Send PING_FRAME response, associated data is opaque value received with PING_FRAME.
+    Pong(u32),
+
+    WindowUpdate {
+        stream_id: u32,
+        flags: Flags,
+        /// delta update to the window size
+        delta: u32,
+    },
+    /// Send GO_AWAY_FRAME to peer with termination error code.
+    GoAway(Reason),
+}
 
 /// Runtime-independent yamux session state machine implementation.
 pub struct Session {
     /// The configured session window size, which may be larger than the default of 256KB.
     window_size: u32,
     /// Stream states by this session.
-    states: HashSet<u32, Stream>,
+    states: HashMap<u32, Stream>,
     /// The inbound stream ids that need be acknowledged.
     ack_stream_ids: HashSet<u32>,
     /// SendFrame that are queued for execution.
     send_queue: VecDeque<SendFrame>,
-    /// Recived terminated reason from peer,carrying by GO_AWAY_FRAME.
+    /// Recived terminated reason from peer or self, carrying by GO_AWAY_FRAME.
     terminated_reason: Option<Reason>,
+}
+
+impl Session {
+    fn recv_data_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let body = frame
+            .body
+            .as_ref()
+            .expect("Frame parse function already check the body length.");
+        let stream_id = frame.header.stream_id();
+
+        let flags = frame.header.flags()?;
+
+        if let Some(stream) = self.states.get_mut(&stream_id) {
+            stream.recv(&body, flags.contains(Flags::FIN))?;
+            stream.update_flags(flags);
+        } else {
+            log::error!(target:"DATA_FRAME","stream, id={}, not found",stream_id);
+        }
+
+        Ok(())
+    }
+
+    fn recv_window_update_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let stream_id = frame.header.stream_id();
+
+        let flags = frame.header.flags()?;
+
+        if let Some(stream) = self.states.get_mut(&stream_id) {
+            let delta = frame.header.length();
+
+            log::trace!(target:"WINDOW_UPDATE_FRAME","stream, id={}, update_window={}",stream_id,delta);
+
+            stream.update_window_size(frame.header.length());
+
+            stream.update_flags(flags);
+        } else {
+            log::error!(target:"WINDOW_UPDATE_FRAME","stream, id={}, not found",stream_id);
+        }
+
+        Ok(())
+    }
+
+    fn recv_ping_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let stream_id = frame.header.stream_id();
+
+        let flags = frame.header.flags()?;
+
+        if stream_id != 0 {
+            // send GO_AWAY_FRAME to peer, and prepare shutdown this session.
+            self.send_queue
+                .push_front(SendFrame::GoAway(Reason::ProtocolError));
+
+            return Err(Error::InvalidFrame(InvalidFrameKind::SessionId));
+        }
+
+        // this is a inbound ping, generate response
+        if flags.contains(Flags::SYN) {
+            self.send_queue
+                .push_front(SendFrame::Pong(frame.header.length()));
+        } else {
+            // TODO: add meaningful RTT measurement codes, now just drop this response.
+        }
+
+        Ok(())
+    }
+
+    fn recv_go_way_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let stream_id = frame.header.stream_id();
+
+        if stream_id != 0 {
+            // What else can I do? It's already said goodbye to me.
+            log::error!(target:"GO_AWAY_FRAME","received GO_AWAY_FRAME via non-session stream, stream_id={}",stream_id);
+        }
+
+        self.terminated_reason = Some((frame.header.length() as u8).into());
+
+        Ok(())
+    }
 }
 
 impl Session {
@@ -236,12 +359,31 @@ impl Session {
         let (frame, read_size) = Frame::parse(buf)?;
 
         match frame.header.frame_type()? {
-            crate::FrameType::Data => todo!(),
-            crate::FrameType::WindowUpdate => todo!(),
-            crate::FrameType::Ping => todo!(),
-            crate::FrameType::GoAway => todo!(),
+            crate::FrameType::Data => self.recv_data_frame(&frame)?,
+            crate::FrameType::WindowUpdate => self.recv_window_update_frame(&frame)?,
+            crate::FrameType::Ping => self.recv_ping_frame(&frame)?,
+            crate::FrameType::GoAway => self.recv_go_way_frame(&frame)?,
         }
 
         Ok(read_size)
+    }
+
+    /// Write a new frame to send to peer.
+    pub fn send(&mut self, buf: &mut [u8]) -> Result<usize> {
+        while let Some(send_frame) = self.send_queue.pop_front() {
+            match send_frame {
+                SendFrame::Data(_, _) => todo!(),
+                SendFrame::Ping(_) => todo!(),
+                SendFrame::Pong(_) => todo!(),
+                SendFrame::WindowUpdate {
+                    stream_id,
+                    flags,
+                    delta,
+                } => todo!(),
+                SendFrame::GoAway(_) => todo!(),
+            }
+        }
+
+        Err(Error::Done)
     }
 }

@@ -57,8 +57,13 @@ pub enum Error {
 pub enum InvalidFrameKind {
     #[error("Invalid frame type.")]
     FrameType,
+
     #[error("The Frame Flags field contains invalid flags.")]
     Flags,
+    #[error("Data frame with empty body or Non data frame with non-empty body.")]
+    Body,
+    #[error("The GO_AWAY_FRAME and PING_FRAME should always use 0 StreamID, while other types of frames should not.")]
+    SessionId,
 }
 
 /// Reason for not being able to build the frame.
