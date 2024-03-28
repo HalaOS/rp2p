@@ -13,6 +13,18 @@ pub enum Error {
 
     #[error("The stream({0}) has already been stopped by the peer's RST frame.")]
     StreamStopped(u32),
+
+    #[error("Call stream_send on stream({0}) after setting the fin flag.")]
+    FinalSize(u32),
+
+    #[error("Unexpect Go away code {0}")]
+    UnknownGoAwayCode(u8),
+
+    #[error("Session terminated by peer with code: {0}")]
+    Terminated(GoAway),
+
+    #[error("Stream not exist or has been closed.")]
+    InvalidStreamState(u32),
 }
 
 /// Type alias of [`std::result::Result<T,Error>`]
@@ -48,10 +60,29 @@ pub enum Flags {
 /// When a session is being terminated, the Go Away message should be sent.
 /// The Length should be set to one of the following to provide an error code:
 #[repr(u8)]
-pub enum SessionTermination {
-    Normal = 0,
+#[derive(Debug, Clone, Copy)]
+pub enum GoAway {
+    Normal,
     ProtocolError,
     InternalError,
+}
+
+impl std::fmt::Display for GoAway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GoAway(0x{:#02x})", *self as u8)
+    }
+}
+
+impl TryFrom<u8> for GoAway {
+    type Error = Error;
+    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Normal),
+            1 => Ok(Self::ProtocolError),
+            2 => Ok(Self::InternalError),
+            _ => Err(Error::UnknownGoAwayCode(value)),
+        }
+    }
 }
 
 /// Yamux uses a streaming connection underneath, but imposes a message framing so that it can be shared between many logical streams. Each frame contains a header like:
@@ -99,16 +130,13 @@ pub struct Frame {
     body: Vec<u8>,
 }
 
-/// Half close status of a stream.
+/// Stream status flags.
 #[bitmask(u8)]
-enum HalfClose {
-    /// Received fin frame from peer, indicated that all data has sent from peer.
-    ///
-    /// Relying on the reliable stream underneath, we receive frames from peers in an ordered sequence,
-    /// so when we see the `fin` frame, we can safely switch the state of the stream to read half close
-    Read,
-    /// Set this flag when call [`stream_send`](YamuxSession::stream_send) with the fin flag set to true.
-    Write,
+enum StreamFlags {
+    READ,
+    WRITE,
+    ACK,
+    RST,
 }
 
 /// A ring buf implementation for stream send/recv buf.
@@ -212,11 +240,23 @@ impl RingBuf {
 /// into a slice.
 #[allow(unused)]
 struct RecvBuf {
-    /// When Yamux is initially starts each stream with a 256KB window size. There is no window size for the session stream(stream_id=0).
-    flow_control_window_size: u32,
-
     /// ring buf initial with fixed size is 256 * 1024
     ring_buf: RingBuf,
+}
+
+impl RecvBuf {
+    /// Write data received from peer into recv ring buf.
+    ///
+    /// Returns false, if the ring_buf has overflowed.
+    fn write(&mut self, buf: &[u8]) -> bool {
+        if self.ring_buf.remaining_mut() > buf.len() {
+            return false;
+        }
+
+        assert_eq!(self.ring_buf.write(buf), buf.len());
+
+        true
+    }
 }
 
 /// Send-side stream buffer.
@@ -235,6 +275,47 @@ struct SendBuf {
     ring_buf: RingBuf,
 }
 
+impl SendBuf {
+    /// write data into send buf, calling this function has no effects on `flow_control_window_size`.
+    fn write(&mut self, buf: &[u8]) -> usize {
+        self.ring_buf.write(buf)
+    }
+
+    /// Read data from the ring buf, and decrease the flow_control_window_size.
+    fn send(&mut self) -> Option<Vec<u8>> {
+        let send_buf_len = min(
+            self.ring_buf.remaining(),
+            self.flow_control_window_size as usize,
+        );
+
+        if send_buf_len == 0 {
+            return None;
+        }
+
+        let mut send_buf = vec![0; send_buf_len];
+
+        assert_eq!(self.ring_buf.read(&mut send_buf), send_buf_len);
+
+        self.flow_control_window_size -= send_buf_len as u32;
+
+        Some(send_buf)
+    }
+
+    /// Increase peer's recv window size.
+    ///
+    /// Returns true, if data needs to send.
+    fn update_window_size(&mut self, delta: u32) -> bool {
+        self.flow_control_window_size += delta;
+
+        let send_buf_len = min(
+            self.ring_buf.remaining(),
+            self.flow_control_window_size as usize,
+        );
+
+        send_buf_len > 0
+    }
+}
+
 /// The stream's inner state, managed by [`YamuxSession`].
 ///
 /// Once both sides have sent a frame with fin flag, the stream is closed and
@@ -244,37 +325,53 @@ struct SendBuf {
 ///
 /// Whenever a frame with the RST flag is sent or received,
 /// the data stream is hard closed and immediately removed from the session.
-#[allow(unused)]
 struct StreamState {
-    half_close_flags: HalfClose,
+    flags: StreamFlags,
     recv_buf: RecvBuf,
     send_buf: SendBuf,
+}
+
+const INIT_WINDOW_SIZE: u32 = 256 * 1024;
+
+impl StreamState {
+    fn new(stream_window_size: u32) -> Self {
+        Self {
+            flags: StreamFlags::READ | StreamFlags::WRITE,
+            recv_buf: RecvBuf {
+                ring_buf: RingBuf::with_capacity(stream_window_size as usize),
+            },
+            send_buf: SendBuf {
+                flow_control_window_size: INIT_WINDOW_SIZE,
+                ring_buf: RingBuf::with_capacity(stream_window_size as usize),
+            },
+        }
+    }
 }
 
 /// Variant for sending data.
 #[allow(unused)]
 #[derive(Debug)]
 enum SendFrame {
-    ///  Signals the start of a new stream.
-    SYN(u32),
-    /// Acknowledges the start of a new stream
-    ACK(u32),
-    /// Performs a half-close of a stream. May be sent with a data message or window update.
-    FIN(u32),
-    /// Reset a stream immediately, outstanding data in the stream’s send buffer is dropped and
-    /// outstanding data in the stream’s receive buffer is dropped also.
-    RST(u32),
     /// Send outstanding data in the stream’s send buffer.
-    Send(u32),
+    Data { stream_id: u32, flags: Flags },
+
+    WindowUpdate {
+        stream_id: u32,
+        delta: u32,
+        flags: Flags,
+    },
     /// Send ping frame.
     Ping(u32),
+    /// Send ping response.
+    Pong(u32),
+    /// Send go away frame to terminate this session.
+    GoAway(GoAway),
 }
 
 /// A state machine type to represent a yamux session
-#[allow(unused)]
 pub struct YamuxSession {
     /// The initial receive window size for the data stream.
-    stream_window_size: usize,
+    stream_window_size: u32,
     /// The next outbound stream id value.
     next_outbound_stream_id: u32,
     /// The ACK backlog is defined as the number of streams that a
@@ -286,27 +383,372 @@ pub struct YamuxSession {
     states: HashMap<u32, StreamState>,
     /// The queueing send frames.
     send_queue: VecDeque<SendFrame>,
+    /// The ping that is waiting response.
+    active_ping_id: Option<u32>,
+    /// Flag is set when a GoAway frame is received or is sent,
+    /// after that all operations should return [`Error::Terminated`].
+    go_away: Option<GoAway>,
 }
 
-#[allow(unused)]
+impl YamuxSession {
+    fn check_session_status(&self) -> Result<()> {
+        if let Some(session_termination) = self.go_away {
+            Err(Error::Terminated(session_termination))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn get_stream_mut(&mut self, stream_id: u32) -> Result<&mut StreamState> {
+        self.states
+            .get_mut(&stream_id)
+            .ok_or(Error::InvalidStreamState(stream_id))
+    }
+
+    fn handle_flags(&mut self, header: &FrameHeader) -> Result<bool> {
+        // handle SYN flag
+        if header.flags.contains(Flags::SYN) {
+            if let FrameType::Ping = header.frame_type {
+                if header.stream_id != 0 {
+                    self.send_queue
+                        .push_front(SendFrame::GoAway(GoAway::ProtocolError));
+
+                    log::error!(
+                        "SYN: send a ping using a non-session stream({})",
+                        header.stream_id
+                    );
+
+                    return Ok(false);
+                }
+
+                return Ok(true);
+            }
+            // Check that stream already exists, send go away frame to terminate this session.
+            if self.states.contains_key(&header.stream_id) {
+                self.send_queue
+                    .push_front(SendFrame::GoAway(GoAway::ProtocolError));
+
+                return Ok(false);
+            }
+
+            self.states
+                .insert(header.stream_id, StreamState::new(self.stream_window_size));
+
+            // Yamux is configured provide a larger limit for window size that sends window update immediately.
+            if self.stream_window_size > INIT_WINDOW_SIZE {
+                let delta = self.stream_window_size - INIT_WINDOW_SIZE;
+
+                self.send_queue.push_back(SendFrame::WindowUpdate {
+                    stream_id: header.stream_id,
+                    delta,
+                    flags: Flags::ACK,
+                })
+            }
+
+            // Otherwise, place the stream ID in the queue of not yet been acknowledged streams.
+            self.unack_inbound_stream_ids.insert(header.stream_id);
+        }
+
+        if header.flags.contains(Flags::ACK) {
+            if let FrameType::Ping = header.frame_type {
+                if header.stream_id != 0 {
+                    self.send_queue
+                        .push_front(SendFrame::GoAway(GoAway::ProtocolError));
+
+                    log::error!(
+                        "ACK: send a ping using a non-session stream({})",
+                        header.stream_id
+                    );
+
+                    return Ok(false);
+                }
+
+                return Ok(true);
+            }
+
+            if let Some(stream_state) = self.states.get_mut(&header.stream_id) {
+                if stream_state.flags.contains(StreamFlags::ACK) {
+                    log::error!(
+                        "ACK: stream({}) had already been acknowledged.",
+                        header.stream_id
+                    );
+                    self.send_queue
+                        .push_back(SendFrame::GoAway(GoAway::ProtocolError));
+
+                    return Ok(false);
+                }
+
+                if stream_state.flags.contains(StreamFlags::RST) {
+                    log::error!("ACK: stream({}) had already been RST.", header.stream_id);
+                    self.send_queue
+                        .push_back(SendFrame::GoAway(GoAway::ProtocolError));
+
+                    return Ok(false);
+                }
+
+                stream_state.flags = stream_state.flags | StreamFlags::ACK;
+            } else {
+                log::error!("ACK: stream({}) not found.", header.stream_id);
+            }
+        }
+
+        if header.flags.contains(Flags::FIN) {
+            if let FrameType::Ping = header.frame_type {
+                self.send_queue
+                    .push_front(SendFrame::GoAway(GoAway::ProtocolError));
+
+                log::error!("FIN: send fin with ping",);
+
+                return Ok(false);
+            }
+
+            if let Some(stream_state) = self.states.get_mut(&header.stream_id) {
+                if !stream_state.flags.contains(StreamFlags::ACK) {
+                    log::error!("FIN: stream({}) fin without ACK.", header.stream_id);
+                    self.send_queue
+                        .push_back(SendFrame::GoAway(GoAway::ProtocolError));
+
+                    return Ok(false);
+                }
+
+                if stream_state.flags.contains(StreamFlags::RST) {
+                    log::error!("FIN: stream({}) had already been RST.", header.stream_id);
+                    self.send_queue
+                        .push_back(SendFrame::GoAway(GoAway::ProtocolError));
+
+                    return Ok(false);
+                }
+
+                stream_state.flags = stream_state.flags.xor(StreamFlags::READ);
+            } else {
+                log::error!("FIN: stream({}) not found.", header.stream_id);
+            }
+        }
+
+        if header.flags.contains(Flags::RST) {
+            if let FrameType::Ping = header.frame_type {
+                self.send_queue
+                    .push_front(SendFrame::GoAway(GoAway::ProtocolError));
+
+                log::error!("RST: send rst with ping",);
+
+                return Ok(false);
+            }
+            if let Some(stream_state) = self.states.get_mut(&header.stream_id) {
+                stream_state.flags = stream_state.flags | StreamFlags::RST;
+            } else {
+                log::error!("RST: stream({}) not found.", header.stream_id);
+            }
+        }
+
+        Ok(true)
+    }
+
+    fn handle_data(&mut self, frame: Frame) -> Result<()> {
+        let state = self.get_stream_mut(frame.header.stream_id)?;
+
+        if state.recv_buf.write(&frame.body) {
+            return Ok(());
+        }
+
+        // stream recv window is overflow, send go away message.
+        self.send_queue
+            .push_back(SendFrame::GoAway(GoAway::ProtocolError));
+
+        Ok(())
+    }
+
+    fn handle_window_update(&mut self, frame: Frame) -> Result<()> {
+        let state = self.get_stream_mut(frame.header.stream_id)?;
+
+        if state.send_buf.update_window_size(frame.header.length) {
+            self.send_data_frame(frame.header.length);
+        }
+
+        Ok(())
+    }
+
+    /// Create new data [`SendFrame`] for `stream_id`
+    fn send_data_frame(&mut self, stream_id: u32) {
+        let mut needs_send_frame = true;
+        for send_frame in &self.send_queue {
+            if let SendFrame::Data {
+                stream_id: id,
+                flags: _,
+            } = send_frame
+            {
+                if *id == stream_id {
+                    needs_send_frame = false;
+                }
+            }
+        }
+
+        if needs_send_frame {
+            let mut flags = Flags::none();
+
+            if self.unack_inbound_stream_ids.remove(&stream_id) {
+                flags |= Flags::ACK;
+            }
+
+            self.send_queue
+                .push_back(SendFrame::Data { stream_id, flags })
+        }
+    }
+
+    fn handle_ping(&mut self, frame: Frame) -> Result<()> {
+        if let Some(ping_id) = self.active_ping_id {
+            // this is a response frame of active ping, complete it.
+            if frame.header.length == ping_id {
+                // TODO: measure rtt.
+                return Ok(());
+            }
+        } else {
+            // queue pong frame.
+            self.send_queue
+                .push_back(SendFrame::Pong(frame.header.length));
+        }
+
+        Ok(())
+    }
+
+    fn handle_go_away(&mut self, frame: Frame) -> Result<()> {
+        let flag = GoAway::try_from(frame.header.length as u8)?;
+
+        log::info!("yamux: peer go away, code={:?}", flag);
+
+        self.go_away = Some(flag);
+
+        Err(Error::Terminated(flag))
+    }
+
+    fn send_ping(&mut self, opaque: u32) -> Frame {
+        let header = FrameHeader {
+            version: 0,
+            frame_type: FrameType::Ping,
+            flags: Flags::SYN,
+            stream_id: 0,
+            length: opaque,
+        };
+
+        Frame {
+            header,
+            body: vec![],
+        }
+    }
+
+    fn send_pong(&mut self, opaque: u32) -> Frame {
+        let header = FrameHeader {
+            version: 0,
+            frame_type: FrameType::Ping,
+            flags: Flags::ACK,
+            stream_id: 0,
+            length: opaque,
+        };
+
+        Frame {
+            header,
+            body: vec![],
+        }
+    }
+
+    fn send_go_away(&mut self, go_away: GoAway) -> Frame {
+        let header = FrameHeader {
+            version: 0,
+            frame_type: FrameType::GoAway,
+            flags: Flags::ACK,
+            stream_id: 0,
+            length: go_away as u8 as u32,
+        };
+
+        Frame {
+            header,
+            body: vec![],
+        }
+    }
+
+    fn send_data(&mut self, stream_id: u32, flags: Flags) -> Option<Frame> {
+        if let Some(stream_state) = self.states.get_mut(&stream_id) {
+            let frame = stream_state.send_buf.send().map(|body| {
+                let header = FrameHeader {
+                    version: 0,
+                    flags,
+                    stream_id,
+                    length: body.len() as u32,
+                    frame_type: FrameType::Data,
+                };
+
+                Frame { header, body }
+            });
+
+            frame
+        } else {
+            None
+        }
+    }
+
+    fn send_window_update(&mut self, stream_id: u32, delta: u32, flags: Flags) -> Frame {
+        let header = FrameHeader {
+            version: 0,
+            flags,
+            frame_type: FrameType::WindowUpdate,
+            stream_id,
+            length: delta,
+        };
+
+        Frame {
+            header,
+            body: vec![],
+        }
+    }
+}
+
 impl YamuxSession {
     /// Processes one ***YAMUX*** frame received from the peer.
     ///
     /// Splitting coalesced packets is not the responsibility of
     /// this function and should be handled manually by yourself.
     pub fn recv(&mut self, frame: Frame) -> Result<()> {
-        match frame.header.frame_type {
-            FrameType::Data => todo!(),
-            FrameType::WindowUpdate => todo!(),
-            FrameType::Ping => todo!(),
-            FrameType::GoAway => todo!(),
+        self.check_session_status()?;
+
+        if !self.handle_flags(&frame.header)? {
+            return Ok(());
         }
-        todo!()
+
+        match frame.header.frame_type {
+            FrameType::Data => self.handle_data(frame),
+            FrameType::WindowUpdate => self.handle_window_update(frame),
+            FrameType::Ping => self.handle_ping(frame),
+            FrameType::GoAway => self.handle_go_away(frame),
+        }
     }
 
     /// Writes a single ***YAMUX*** frame to be sent to the peer.
-    pub fn send(&mut self) -> Result<Frame> {
-        todo!()
+    ///
+    /// Returns [`None`] if there are no frames to send.
+    pub fn send(&mut self) -> Result<Option<Frame>> {
+        self.check_session_status()?;
+
+        while let Some(frame) = self.send_queue.pop_front() {
+            match frame {
+                SendFrame::Data { stream_id, flags } => {
+                    if let Some(frame) = self.send_data(stream_id, flags) {
+                        return Ok(Some(frame));
+                    }
+
+                    continue;
+                }
+                SendFrame::WindowUpdate {
+                    stream_id,
+                    delta,
+                    flags,
+                } => return Ok(Some(self.send_window_update(stream_id, delta, flags))),
+                SendFrame::Ping(opaque) => return Ok(Some(self.send_ping(opaque))),
+                SendFrame::Pong(opaque) => return Ok(Some(self.send_pong(opaque))),
+                SendFrame::GoAway(go_way) => return Ok(Some(self.send_go_away(go_way))),
+            }
+        }
+
+        Ok(None)
     }
 
     /// Returns an iterator over streams that have outstanding data to read.
@@ -315,6 +757,10 @@ impl YamuxSession {
     /// at the time the iterator itself was created (i.e. when readable() was called).
     /// To account for newly readable streams, the iterator needs to be created again.
     pub fn readable(&self) -> impl Iterator<Item = u32> {
+        if self.check_session_status().is_err() {
+            return vec![].into_iter();
+        }
+
         vec![].into_iter()
     }
 
@@ -328,6 +774,10 @@ impl YamuxSession {
     /// itself was created (i.e. when writable() was called). To account for newly writable streams,
     /// the iterator needs to be created again.
     pub fn writable(&self) -> impl Iterator<Item = u32> {
+        if self.check_session_status().is_err() {
+            return vec![].into_iter();
+        }
+
         vec![].into_iter()
     }
 
@@ -343,7 +793,20 @@ impl YamuxSession {
     /// In addition, if the peer has signalled that it doesn’t want to receive any more data from this stream
     /// by sending the window update frame with RST flag, the StreamStopped error will be returned instead of any data.
     pub fn stream_send(&mut self, stream_id: u32, buf: &[u8], fin: bool) -> Result<usize> {
-        todo!()
+        let stream_state = self
+            .states
+            .get_mut(&stream_id)
+            .ok_or(Error::InvalidStreamState(stream_id))?;
+
+        if !stream_state.flags.contains(StreamFlags::WRITE) {
+            return Err(Error::FinalSize(stream_id));
+        }
+
+        if fin {
+            stream_state.flags ^= StreamFlags::WRITE;
+        }
+
+        Ok(stream_state.send_buf.write(buf))
     }
 
     /// Reads contiguous data from a stream into the provided slice.
@@ -356,6 +819,7 @@ impl YamuxSession {
     /// Reading data from a stream may trigger queueing of control messages (e.g. Window Update).
     /// [`send()`](Self::send) should be called after reading.
     pub fn stream_recv(&mut self, stream_id: u32, buf: &mut [u8]) -> Result<(usize, bool)> {
+        self.check_session_status()?;
         todo!()
     }
 
@@ -364,6 +828,7 @@ impl YamuxSession {
     /// This operation may trigger queueing of control messages (e.g. Window Update) with the RST flag.
     /// [`send()`](Self::send) should be called after close.
     pub fn stream_close(&mut self, stream_id: u32) -> Result<()> {
+        self.check_session_status()?;
         todo!()
     }
 }
