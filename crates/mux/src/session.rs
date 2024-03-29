@@ -5,7 +5,7 @@ use std::{
 
 use bitmask_enum::bitmask;
 
-use crate::{ring_buf::RingBuf, Error, Flags, Frame, InvalidFrameKind, Result};
+use crate::{ring_buf::RingBuf, Error, Flags, Frame, FrameBuilder, InvalidFrameKind, Result};
 
 /// The send buf of stream state.
 struct SendBuf {
@@ -32,16 +32,16 @@ impl SendBuf {
     /// Reads contiguous data from the send buf into the provided slice.
     ///
     /// Return [`Error:Done`], if peer's recv window is zero.
-    fn read(&mut self) -> Result<Vec<u8>> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         let read_size = min(self.window_size as usize, self.inner_buf.remaining());
+        let read_size = min(read_size, buf.len());
 
         if read_size == 0 {
             Err(Error::Done)
         } else {
-            let mut buf = vec![0; read_size];
-            assert_eq!(self.inner_buf.read(&mut buf), read_size);
+            assert_eq!(self.inner_buf.read(&mut buf[..read_size]), read_size);
 
-            Ok(buf)
+            Ok(read_size)
         }
     }
 }
@@ -176,12 +176,12 @@ impl Stream {
     /// Write a single yamux DATA_FRAME body to be sent to the peer.
     ///
     /// This function always returns [`Error::Done`], when the stream has been RST by peer, .
-    fn send(&mut self) -> Result<Vec<u8>> {
+    fn send(&mut self, buf: &mut [u8]) -> Result<usize> {
         if self.state.contains(StreamState::RST) {
             return Err(Error::Done);
         }
 
-        self.send_buf.read()
+        self.send_buf.read(buf)
     }
 
     /// Test if this stream can be safely removed from session .
@@ -288,9 +288,26 @@ impl Session {
         if let Some(stream) = self.states.get_mut(&stream_id) {
             stream.recv(&body, flags.contains(Flags::FIN))?;
             stream.update_flags(flags);
-        } else {
-            log::error!(target:"DATA_FRAME","stream, id={}, not found",stream_id);
+
+            return Ok(());
         }
+
+        // Newly incoming stream.
+        if flags.contains(Flags::SYN) {
+            let mut stream = Stream::new(self.window_size, stream_id);
+
+            stream.recv(&body, flags.contains(Flags::FIN))?;
+
+            stream.update_flags(flags);
+
+            self.states.insert(stream_id, stream);
+
+            self.ack_stream_ids.insert(stream_id);
+
+            log::info!(target:"DATA_FRAME","newly incoming stream, stream_id={}",stream_id);
+        }
+
+        log::error!(target:"DATA_FRAME","stream, id={}, not found",stream_id);
 
         Ok(())
     }
@@ -308,9 +325,26 @@ impl Session {
             stream.update_window_size(frame.header.length());
 
             stream.update_flags(flags);
-        } else {
-            log::error!(target:"WINDOW_UPDATE_FRAME","stream, id={}, not found",stream_id);
+
+            return Ok(());
         }
+
+        // Newly incoming stream.
+        if flags.contains(Flags::SYN) {
+            let mut stream = Stream::new(self.window_size, stream_id);
+
+            stream.update_window_size(frame.header.length());
+
+            stream.update_flags(flags);
+
+            self.states.insert(stream_id, stream);
+
+            self.ack_stream_ids.insert(stream_id);
+
+            log::error!(target:"DATA_FRAME","newly incoming stream, stream_id={}",stream_id);
+        }
+
+        log::error!(target:"WINDOW_UPDATE_FRAME","stream, id={}, not found",stream_id);
 
         Ok(())
     }
@@ -351,6 +385,90 @@ impl Session {
 
         Ok(())
     }
+
+    fn send_data_frame(&mut self, stream_id: u32, flags: Flags, buf: &mut [u8]) -> Result<usize> {
+        if let Some(stream) = self.states.get_mut(&stream_id) {
+            let mut header = buf[..12].try_into().unwrap();
+            let frame_builder = FrameBuilder::new_with(&mut header)
+                .frame_type(crate::FrameType::Data)
+                .stream_id(stream_id)
+                .flags(flags);
+
+            // Safety: the [`send`](Self::send) function already checks the buf length.
+            let send_size = stream.send(&mut buf[12..])?;
+
+            // Constraints check
+            frame_builder.create(&buf[12..send_size])?;
+
+            Ok(send_size)
+        } else {
+            log::error!(target:"DATA_FRAME","send data frame, stream_id={}, stream not found",stream_id);
+            Err(Error::Done)
+        }
+    }
+
+    fn send_ping(&mut self, opaque: u32, buf: &mut [u8]) -> Result<usize> {
+        let mut header = buf[..12].try_into().unwrap();
+        let _ = FrameBuilder::new_with(&mut header)
+            .frame_type(crate::FrameType::Ping)
+            .stream_id(0)
+            .flags(Flags::SYN)
+            .length(opaque)
+            // Constraints check
+            .create_without_body()?;
+
+        Ok(12)
+    }
+
+    fn send_pong(&mut self, opaque: u32, buf: &mut [u8]) -> Result<usize> {
+        let mut header = buf[..12].try_into().unwrap();
+        let _ = FrameBuilder::new_with(&mut header)
+            .frame_type(crate::FrameType::Ping)
+            .stream_id(0)
+            .flags(Flags::ACK)
+            .length(opaque)
+            // Constraints check
+            .create_without_body()?;
+
+        Ok(12)
+    }
+
+    fn send_window_update(
+        &mut self,
+        stream_id: u32,
+        flags: Flags,
+        delta: u32,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let mut header = buf[..12].try_into().unwrap();
+        let _ = FrameBuilder::new_with(&mut header)
+            .frame_type(crate::FrameType::Ping)
+            .stream_id(stream_id)
+            .flags(flags)
+            .length(delta)
+            // Constraints check
+            .create_without_body()?;
+
+        Ok(12)
+    }
+
+    fn send_go_away(&mut self, reason: Reason, buf: &mut [u8]) -> Result<usize> {
+        let mut header = buf[..12].try_into().unwrap();
+
+        let reason_code: u8 = reason.into();
+
+        let _ = FrameBuilder::new_with(&mut header)
+            .frame_type(crate::FrameType::Ping)
+            .stream_id(0)
+            .length(reason_code as u32)
+            // Constraints check
+            .create_without_body()?;
+
+        // set reason code.
+        self.terminated_reason = Some(reason);
+
+        Ok(12)
+    }
 }
 
 impl Session {
@@ -370,18 +488,29 @@ impl Session {
 
     /// Write a new frame to send to peer.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize> {
+        if buf.len() < 12 {
+            return Err(Error::BufferTooShort(12));
+        }
+
         while let Some(send_frame) = self.send_queue.pop_front() {
             match send_frame {
-                SendFrame::Data(_, _) => todo!(),
-                SendFrame::Ping(_) => todo!(),
-                SendFrame::Pong(_) => todo!(),
+                SendFrame::Data(stream_id, flags) => {
+                    match self.send_data_frame(stream_id, flags, buf) {
+                        Err(Error::Done) => {
+                            continue;
+                        }
+                        r => return r,
+                    }
+                }
+                SendFrame::Ping(opaque) => return self.send_ping(opaque, buf),
+                SendFrame::Pong(opaque) => return self.send_pong(opaque, buf),
                 SendFrame::WindowUpdate {
                     stream_id,
                     flags,
                     delta,
-                } => todo!(),
-                SendFrame::GoAway(_) => todo!(),
-            }
+                } => return self.send_window_update(stream_id, flags, delta, buf),
+                SendFrame::GoAway(reason) => return self.send_go_away(reason, buf),
+            };
         }
 
         Err(Error::Done)

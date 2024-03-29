@@ -1,4 +1,7 @@
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    ops::{Deref, DerefMut},
+};
 
 use bitmask_enum::bitmask;
 
@@ -63,6 +66,8 @@ impl<'a> From<&'a [u8; 12]> for FrameHeader<'a> {
 }
 
 impl<'a> FrameHeader<'a> {
+    /// use [`FrameBuilder`] to create new `Frame` instance step by step.
+
     /// Get yamux verson field, should always returns 0.
     pub fn version(&self) -> u8 {
         match self {
@@ -122,12 +127,17 @@ impl<'a> FrameHeader<'a> {
     }
 }
 
-/// A builder to create new frame instance.
-pub struct FrameBuilder([u8; 12]);
+/// The frame header builder
+pub struct FrameHeaderBuilder<'a>(&'a mut [u8; 12]);
 
-impl FrameBuilder {
+impl<'a> FrameHeaderBuilder<'a> {
+    /// Create header builder with provided buf.
+    pub fn with(buf: &'a mut [u8; 12]) -> Self {
+        Self(buf)
+    }
+
     /// Set type type field value, the default value is [`FrameType::Data`]
-    pub fn frame_type(mut self, frame_type: FrameType) -> Self {
+    pub fn frame_type(self, frame_type: FrameType) -> Self {
         self.0[1] = frame_type as u8;
         self
     }
@@ -135,7 +145,7 @@ impl FrameBuilder {
     /// Set frame header flags field, encoded in network order(big endian).
     ///
     /// The default value is None.
-    pub fn flags(mut self, flags: Flags) -> Self {
+    pub fn flags(self, flags: Flags) -> Self {
         self.0[2..4].copy_from_slice(flags.bits.to_be_bytes().as_slice());
 
         self
@@ -144,7 +154,7 @@ impl FrameBuilder {
     /// Set frame header stream_id field, encoded in network order(big endian).
     ///
     /// The default value is session stream_id(0).
-    pub fn stream_id(mut self, stream_id: u32) -> Self {
+    pub fn stream_id(self, stream_id: u32) -> Self {
         self.0[4..8].copy_from_slice(stream_id.to_be_bytes().as_slice());
 
         self
@@ -157,8 +167,81 @@ impl FrameBuilder {
     /// - Window update - provides a delta update to the window size
     /// - Ping - Contains an opaque value, echoed back
     /// - Go Away - Contains an error code
-    pub fn length(mut self, length: u32) -> Self {
+    pub fn length(self, length: u32) -> Self {
         self.0[8..12].copy_from_slice(length.to_be_bytes().as_slice());
+
+        self
+    }
+}
+
+/// A builder to create new frame instance.
+pub enum FrameBuilder<'a> {
+    Borrowed(&'a mut [u8; 12]),
+    Owned([u8; 12]),
+}
+
+impl<'a> Deref for FrameBuilder<'a> {
+    type Target = [u8; 12];
+    fn deref(&self) -> &Self::Target {
+        match self {
+            FrameBuilder::Borrowed(buf) => *buf,
+            FrameBuilder::Owned(buf) => buf,
+        }
+    }
+}
+
+impl<'a> DerefMut for FrameBuilder<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            FrameBuilder::Borrowed(buf) => *buf,
+            FrameBuilder::Owned(buf) => buf,
+        }
+    }
+}
+
+impl FrameBuilder<'static> {
+    pub fn new() -> FrameBuilder<'static> {
+        FrameBuilder::Owned([0; 12])
+    }
+}
+impl<'a> FrameBuilder<'a> {
+    pub fn new_with(buf: &'a mut [u8; 12]) -> FrameBuilder<'a> {
+        FrameBuilder::Borrowed(buf)
+    }
+
+    /// Set type type field value, the default value is [`FrameType::Data`]
+    pub fn frame_type(mut self, frame_type: FrameType) -> Self {
+        FrameHeaderBuilder::with(&mut self).frame_type(frame_type);
+        self
+    }
+
+    /// Set frame header flags field, encoded in network order(big endian).
+    ///
+    /// The default value is None.
+    pub fn flags(mut self, flags: Flags) -> Self {
+        FrameHeaderBuilder::with(&mut self).flags(flags);
+
+        self
+    }
+
+    /// Set frame header stream_id field, encoded in network order(big endian).
+    ///
+    /// The default value is session stream_id(0).
+    pub fn stream_id(mut self, stream_id: u32) -> Self {
+        FrameHeaderBuilder::with(&mut self).stream_id(stream_id);
+
+        self
+    }
+
+    /// Set frame header stream_id field, encoded in network order(big endian).
+    ///
+    /// The meaning of the length field depends on the message type:
+    /// - Data - provides the length of bytes following the header
+    /// - Window update - provides a delta update to the window size
+    /// - Ping - Contains an opaque value, echoed back
+    /// - Go Away - Contains an error code
+    pub fn length(mut self, length: u32) -> Self {
+        FrameHeaderBuilder::with(&mut self).length(length);
 
         self
     }
@@ -166,8 +249,8 @@ impl FrameBuilder {
     /// Consume self and create [`Frame`] instance with provided body data.
     ///
     /// Returns [Error::FrameRestriction], if call this function with frame_type is not [`FrameType::Data`]
-    pub fn create<B: Into<Vec<u8>>>(self, body: B) -> Result<Frame<'static>> {
-        let header = FrameHeader::Borrowed(&self.0);
+    pub fn create<B: Into<Cow<'a, [u8]>>>(self, body: B) -> Result<Frame<'a>> {
+        let header = FrameHeader::Borrowed(&self);
 
         if header.frame_type()? != FrameType::Data {
             return Err(Error::FrameRestriction(FrameRestrictionKind::Body));
@@ -177,22 +260,29 @@ impl FrameBuilder {
             return Err(Error::FrameRestriction(FrameRestrictionKind::SessionId));
         }
 
-        let body: Vec<u8> = body.into();
+        let body: Cow<'a, [u8]> = body.into();
 
         let this = self.length(body.len() as u32);
 
         Ok(Frame {
-            header: FrameHeader::Owned(this.0),
-            body: Some(Cow::Owned(body.into())),
+            header: this.into_header(),
+            body: Some(body),
         })
+    }
+
+    fn into_header(self) -> FrameHeader<'a> {
+        match self {
+            FrameBuilder::Borrowed(buf) => FrameHeader::Borrowed(buf),
+            FrameBuilder::Owned(buf) => FrameHeader::Owned(buf),
+        }
     }
 
     /// Consume self and create [`Frame`] instance without frame body.
     ///
     /// This function will check the frame_type,
     /// Data frame is not allowed to call this function, use [`create`](Self::create) instead.
-    pub fn create_without_body(self) -> Result<Frame<'static>> {
-        let header = FrameHeader::Owned(self.0);
+    pub fn create_without_body(self) -> Result<Frame<'a>> {
+        let header = self.into_header();
 
         let flags = header.flags()?;
 
@@ -241,13 +331,6 @@ pub struct Frame<'a> {
     pub header: FrameHeader<'a>,
     /// frame body buf.
     pub body: Option<Cow<'a, [u8]>>,
-}
-
-impl Frame<'static> {
-    /// use [`FrameBuilder`] to create new `Frame` instance step by step.
-    pub fn build() -> FrameBuilder {
-        FrameBuilder([0; 12])
-    }
 }
 
 impl<'a> Frame<'a> {
@@ -300,66 +383,66 @@ mod tests {
 
     #[test]
     fn test_call_create_without_body() {
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::ACK)
             .stream_id(1)
             .frame_type(FrameType::Data)
             .create_without_body()
             .expect_err("Data frame should call create fn instead.");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::SYN)
             .stream_id(1)
             .frame_type(FrameType::GoAway)
             .create_without_body()
             .expect_err("Can't set SYN flags in GO_AWAY_FRAME");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::ACK)
             .stream_id(1)
             .frame_type(FrameType::GoAway)
             .create_without_body()
             .expect_err("Can't set ACK flags in GO_AWAY_FRAME");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::FIN)
             .stream_id(1)
             .frame_type(FrameType::GoAway)
             .create_without_body()
             .expect_err("Can't set FIN flags in GO_AWAY_FRAME");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::RST)
             .stream_id(1)
             .frame_type(FrameType::GoAway)
             .create_without_body()
             .expect_err("Can't set RST flags in GO_AWAY_FRAME");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::FIN)
             .frame_type(FrameType::Ping)
             .create_without_body()
             .expect_err("Can't set FIN flags in PING_FRAME");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::RST)
             .frame_type(FrameType::Ping)
             .create_without_body()
             .expect_err("Can't set RST flags in PING_FRAME");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::ACK)
             .frame_type(FrameType::Ping)
             .create_without_body()
             .expect("Set ACK in PING_FRAME to indicate response");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::SYN)
             .frame_type(FrameType::Ping)
             .create_without_body()
             .expect("Set ACK in PING_FRAME to indicate outbound");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::full())
             .stream_id(1)
             .frame_type(FrameType::WindowUpdate)
@@ -369,27 +452,27 @@ mod tests {
 
     #[test]
     fn test_call_create() {
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::full())
             .stream_id(1)
             .frame_type(FrameType::Data)
             .create(b"")
             .expect("All flags in DATA_FRAME are valid.");
 
-        Frame::build()
+        FrameBuilder::new()
             .stream_id(1)
             .frame_type(FrameType::GoAway)
             .create(b"")
             .expect_err("Body data is not allowed in GO_AWAY_FRAME");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::full())
             .stream_id(1)
             .frame_type(FrameType::WindowUpdate)
             .create(b"")
             .expect_err("Body data is not allowed in WINDOW_UPDATE");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::SYN)
             .frame_type(FrameType::Ping)
             .create(b"")
@@ -398,27 +481,27 @@ mod tests {
 
     #[test]
     fn test_session_id() {
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::SYN)
             .stream_id(1)
             .frame_type(FrameType::Ping)
             .create_without_body()
             .expect_err("PING_FRAME should always use 0 stream id");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::none())
             .stream_id(1)
             .frame_type(FrameType::GoAway)
             .create_without_body()
             .expect_err("GO_AWAY_FRAME should always use 0 stream id");
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::SYN)
             .frame_type(FrameType::Ping)
             .create_without_body()
             .unwrap();
 
-        Frame::build()
+        FrameBuilder::new()
             .flags(Flags::none())
             .frame_type(FrameType::GoAway)
             .create_without_body()
