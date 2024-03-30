@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 /// Yamux errors type.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, PartialEq)]
 pub enum Error {
     /// The operation cannot be completed because the connection is in an invalid state.
     #[error("The operation cannot be completed because the connection is in an invalid state.")]
@@ -53,7 +53,7 @@ pub enum Error {
 }
 
 /// Reason for not being able to parse the frame.
-#[derive(Debug, Clone, Copy, Error)]
+#[derive(Debug, Clone, Copy, Error, PartialEq)]
 pub enum InvalidFrameKind {
     #[error("Invalid frame type.")]
     FrameType,
@@ -67,7 +67,7 @@ pub enum InvalidFrameKind {
 }
 
 /// Reason for not being able to build the frame.
-#[derive(Debug, Clone, Copy, Error)]
+#[derive(Debug, Clone, Copy, Error, PartialEq)]
 pub enum FrameRestrictionKind {
     /// Only DATA_FRAME is allowed to set the body content.
     #[error("Only DATA_FRAME is allowed to set the body content.")]

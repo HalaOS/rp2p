@@ -172,6 +172,46 @@ impl<'a> FrameHeaderBuilder<'a> {
 
         self
     }
+
+    pub fn valid(self) -> Result<&'a mut [u8; 12]> {
+        let header = FrameHeader::Borrowed(self.0);
+
+        let flags = header.flags()?;
+        let length = header.length();
+
+        match header.frame_type()? {
+            FrameType::Ping => {
+                // FIN and RST flags are not allowed in PING_FRAME.
+                if flags.contains(Flags::FIN) || flags.contains(Flags::RST) {
+                    return Err(Error::FrameRestriction(FrameRestrictionKind::Body));
+                }
+
+                if header.stream_id() != 0 {
+                    return Err(Error::FrameRestriction(FrameRestrictionKind::SessionId));
+                }
+            }
+            FrameType::GoAway => {
+                // The flags field of GO_AWAY_FRAME must none.
+                if !flags.is_none() {
+                    return Err(Error::FrameRestriction(FrameRestrictionKind::Body));
+                }
+
+                if header.stream_id() != 0 {
+                    return Err(Error::FrameRestriction(FrameRestrictionKind::SessionId));
+                }
+            }
+            t => {
+                if header.stream_id() == 0 {
+                    return Err(Error::FrameRestriction(FrameRestrictionKind::SessionId));
+                }
+
+                if t == FrameType::Data && length == 0 {
+                    return Err(Error::FrameRestriction(FrameRestrictionKind::Body));
+                }
+            }
+        }
+        Ok(self.0)
+    }
 }
 
 /// A builder to create new frame instance.
@@ -352,25 +392,22 @@ impl<'a> Frame<'a> {
         // convert array &[u8;12] to `FrameHeader`
         let header: FrameHeader<'_> = FrameHeader::from(head_buf);
 
-        let frame_len = header.length() as usize + 12;
-
-        if buf.len() < frame_len {
-            return Err(Error::BufferTooShort(frame_len as u32));
-        }
-
         let frame_type = header.frame_type()?;
 
-        let body = if frame_type == FrameType::Data {
+        let (body, frame_len) = if frame_type == FrameType::Data {
+            let frame_len = header.length() as usize + 12;
+
+            if buf.len() < frame_len {
+                return Err(Error::BufferTooShort(frame_len as u32));
+            }
+
             if frame_len == 12 {
                 return Err(Error::InvalidFrame(InvalidFrameKind::Body));
             }
 
-            Some(Cow::Borrowed(&buf[12..frame_len]))
+            (Some(Cow::Borrowed(&buf[12..frame_len])), frame_len)
         } else {
-            if frame_len != 12 {
-                return Err(Error::InvalidFrame(InvalidFrameKind::Body));
-            }
-            None
+            (None, 12)
         };
 
         Ok((Frame { header, body }, frame_len))
