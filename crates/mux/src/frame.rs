@@ -127,7 +127,7 @@ impl<'a> FrameHeader<'a> {
     }
 }
 
-/// The frame header builder
+/// A builder for [`FrameHeader`]
 pub struct FrameHeaderBuilder<'a>(&'a mut [u8; 12]);
 
 impl<'a> FrameHeaderBuilder<'a> {
