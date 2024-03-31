@@ -1,4 +1,7 @@
-use std::{cmp::min, collections::VecDeque};
+use std::{
+    cmp::min,
+    collections::{HashMap, VecDeque},
+};
 
 use bitmask_enum::bitmask;
 
@@ -244,6 +247,10 @@ impl Stream {
     /// you should first call [`Self::window_size_updatable`] before calling
     /// this function to check if you need to send a `WINDOW_UPDATE_FRAME`.
     fn send_window_size_update_frame(&mut self, buf: &mut [u8], flags: Flags) -> Result<()> {
+        if flags.contains(Flags::ACK) {
+            self.state |= StreamState::Ack;
+        }
+
         self.recv_buf
             .send_window_update_frame(buf, self.stream_id, flags)
     }
@@ -253,6 +260,10 @@ impl Stream {
     /// Returns [`Error::None`], if there are no more packets to send or reached the peer's flow control limits.
     /// you should call `create_data_frame()` multiple times until Done is returned.
     fn send_data_frame(&mut self, buf: &mut [u8], flags: Flags) -> Result<usize> {
+        if flags.contains(Flags::ACK) {
+            self.state |= StreamState::Ack;
+        }
+
         self.send_buf.send_data_frame(buf, self.stream_id, flags)
     }
 
@@ -336,13 +347,13 @@ impl Stream {
         if fin {
             if !self.state.contains(StreamState::Write) {
                 log::error!("Set fin flag twice, stream_id={}", self.stream_id);
-                return Err(Error::InvalidStreamState(self.stream_id));
+                return Err(Error::FinalSize(self.stream_id));
             }
 
             self.state ^= StreamState::Write;
         } else if !self.state.contains(StreamState::Write) {
             log::error!("Send data after set fin flag, stream_id={}", self.stream_id);
-            return Err(Error::InvalidStreamState(self.stream_id));
+            return Err(Error::FinalSize(self.stream_id));
         }
 
         self.send_buf.write(buf)
@@ -373,10 +384,222 @@ impl Stream {
     }
 }
 
+enum SendFrame {
+    Ping(u32),
+    Pong(u32),
+    WindowUpdate { stream_id: u32, flags: Flags },
+    Data { stream_id: u32, flags: Flags },
+    GoAway(Reason),
+}
+
+/// Session terminated reason.
+pub enum Reason {
+    Normal,
+    ProtocolError,
+    InternalError,
+    Unknown(u8),
+}
+
+impl From<u8> for Reason {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Normal,
+            1 => Self::ProtocolError,
+            2 => Self::InternalError,
+            _ => Self::Unknown(value),
+        }
+    }
+}
+
+impl Into<u8> for Reason {
+    fn into(self) -> u8 {
+        match self {
+            Reason::Normal => 0,
+            Reason::ProtocolError => 1,
+            Reason::InternalError => 2,
+            Reason::Unknown(v) => v,
+        }
+    }
+}
+
 /// A yamux session type for handling the logical streams.
 pub struct Session {
+    /// Session configured window size.
+    window_size: u32,
+
     /// incoming stream ids that have not yet been acknowledged.
     incoming_stream_ids: VecDeque<u32>,
+
+    /// the streams handle by this session.
+    streams: HashMap<u32, Stream>,
+
+    /// Queue of frames waiting to be sent to peer.
+    send_frames: VecDeque<SendFrame>,
+
+    terminated: Option<Reason>,
+}
+
+impl Session {
+    fn recv_inner(&mut self, buf: &[u8]) -> Result<usize> {
+        let (frame, read_size) = Frame::parse(buf)?;
+
+        let frame_type = frame.header.frame_type()?;
+
+        match frame_type {
+            FrameType::Data => self.recv_data_frame(&frame)?,
+            FrameType::WindowUpdate => self.recv_window_update_frame(&frame)?,
+            FrameType::Ping => self.recv_ping_frame(&frame)?,
+            FrameType::GoAway => self.recv_go_away_frame(&frame)?,
+        }
+
+        Ok(read_size)
+    }
+
+    fn recv_data_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let stream_id = frame.header.stream_id();
+
+        let flags = frame.header.flags()?;
+
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.recv_data_frame(frame)?;
+        } else {
+            if flags.contains(Flags::SYN) {
+                let mut stream = Stream::new(stream_id, self.window_size);
+                stream.recv_data_frame(frame)?;
+
+                if stream.window_size_updatable() {
+                    self.send_frames.push_back(SendFrame::WindowUpdate {
+                        stream_id,
+                        flags: Flags::ACK,
+                    });
+                }
+            } else {
+                // terminate the session.
+                self.send_frames
+                    .push_back(SendFrame::GoAway(Reason::ProtocolError));
+                // terminate recv loop
+                return Err(Error::InvalidState);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn recv_window_update_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let stream_id = frame.header.stream_id();
+
+        let flags = frame.header.flags()?;
+
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.recv_data_frame(frame)?;
+        } else {
+            if flags.contains(Flags::SYN) {
+                let mut stream = Stream::new(stream_id, self.window_size);
+                stream.recv_window_update_frame(frame)?;
+
+                if stream.window_size_updatable() {
+                    self.send_frames.push_back(SendFrame::WindowUpdate {
+                        stream_id,
+                        flags: Flags::ACK,
+                    });
+                }
+            } else {
+                // terminate the session.
+                self.send_frames
+                    .push_back(SendFrame::GoAway(Reason::ProtocolError));
+                // terminate recv loop
+                return Err(Error::InvalidState);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn recv_ping_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let stream_id = frame.header.stream_id();
+
+        if stream_id != 0 {
+            // terminate the session.
+            self.send_frames
+                .push_back(SendFrame::GoAway(Reason::ProtocolError));
+
+            log::error!("received ping message via non-session id({})", stream_id);
+            // terminate recv loop
+            return Err(Error::InvalidState);
+        }
+
+        let flags = frame.header.flags()?;
+
+        // indicate inbound ping
+        if flags.contains(Flags::SYN) {
+            self.send_frames
+                .push_back(SendFrame::Pong(frame.header.length()));
+        } else {
+            // TODO: check ping result.
+        }
+
+        Ok(())
+    }
+
+    fn recv_go_away_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
+        let stream_id = frame.header.stream_id();
+
+        if stream_id != 0 {
+            // terminate the session.
+            self.send_frames
+                .push_back(SendFrame::GoAway(Reason::ProtocolError));
+
+            log::error!("received go away message via non-session id({})", stream_id);
+            // terminate recv loop
+            return Err(Error::InvalidState);
+        }
+
+        self.terminated = Some((frame.header.length() as u8).into());
+
+        Ok(())
+    }
+}
+
+impl Session {
+    /// Create new session with custom window size.
+    pub fn new(window_size: u32) -> Self {
+        assert!(window_size >= INIT_WINDOW_SIZE);
+
+        Self {
+            window_size,
+            incoming_stream_ids: Default::default(),
+            streams: Default::default(),
+            send_frames: Default::default(),
+            terminated: None,
+        }
+    }
+
+    /// Write new data received from peer.
+    pub fn recv(&mut self, buf: &[u8]) -> Result<usize> {
+        match self.recv_inner(buf) {
+            Ok(read_size) => Ok(read_size),
+            Err(err) => {
+                // self.terminated = Some(Reason::ProtocolError);
+                self.send_frames
+                    .push_back(SendFrame::GoAway(Reason::ProtocolError));
+
+                return Err(err);
+            }
+        }
+    }
+
+    /// Write new frame to be sent to peer.
+    pub fn send(&mut self, buf: &mut [u8]) -> Result<usize> {
+        todo!()
+    }
+
+    pub fn stream_send(&mut self, stream_id: u32, buf: &[u8], fin: bool) -> Result<usize> {
+        todo!()
+    }
+
+    pub fn stream_recv(&mut self, stream_id: u32, buf: &mut [u8]) -> Result<(usize, bool)> {
+        todo!()
+    }
 }
 
 #[cfg(test)]
