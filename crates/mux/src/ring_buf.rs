@@ -36,7 +36,7 @@ impl RingBuf {
     pub(crate) fn write(&mut self, buf: &[u8]) -> usize {
         let max_written = min(self.remaining_mut(), buf.len());
 
-        if self.chunk_mut_offset % self.memory.len() > self.chunk_offset % self.memory.len() {
+        if self.chunk_mut_offset % self.memory.len() >= self.chunk_offset % self.memory.len() {
             let chunk_mut_offset = self.chunk_mut_offset % self.memory.len();
             let write_to_end = self.memory.len() - chunk_mut_offset;
 
@@ -70,7 +70,7 @@ impl RingBuf {
     pub(crate) fn read(&mut self, buf: &mut [u8]) -> usize {
         let max_read = min(self.remaining(), buf.len());
 
-        if self.chunk_offset % self.memory.len() > self.chunk_mut_offset % self.memory.len() {
+        if self.chunk_offset % self.memory.len() >= self.chunk_mut_offset % self.memory.len() {
             let chunk_offset = self.chunk_offset % self.memory.len();
             let read_to_end = self.memory.len() - chunk_offset;
 

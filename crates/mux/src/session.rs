@@ -73,7 +73,7 @@ impl RecvBuf {
     /// The length fo the provided slice must be greater than or equal to 12,
     /// otherwise returns [`Error::BufferTooShort`].
     ///
-    /// Returns [`Error::InvalidStreamState`] if delta_window_size is zero.
+    /// Returns [`Error::Done`] if delta_window_size is zero.
     /// you should first call [`Self::window_size_updatable`] before calling
     /// this function to check if you need to send a `WINDOW_UPDATE_FRAME`.
     fn send_window_update_frame(
@@ -83,7 +83,7 @@ impl RecvBuf {
         flags: Flags,
     ) -> Result<()> {
         if self.delta_window_size == 0 {
-            return Err(Error::InvalidStreamState(stream_id));
+            return Err(Error::Done);
         }
 
         if buf.len() < 12 {
@@ -204,6 +204,8 @@ enum StreamState {
     Write,
     /// Reset flag, set by local or peer.
     Reset,
+    /// Syn flag, set by local.
+    Syn,
     /// Acknowledged flag, set by local or peer.
     Ack,
 }
@@ -243,12 +245,17 @@ impl Stream {
     /// The length fo the provided slice must be greater than or equal to 12,
     /// otherwise returns [`Error::BufferTooShort`].
     ///
-    /// Returns [`Error::InvalidStreamState`] if delta_window_size is zero.
+    /// Returns [`Error::Done`] if delta_window_size is zero.
     /// you should first call [`Self::window_size_updatable`] before calling
     /// this function to check if you need to send a `WINDOW_UPDATE_FRAME`.
-    fn send_window_size_update_frame(&mut self, buf: &mut [u8], flags: Flags) -> Result<()> {
+    fn send_window_size_update_frame(&mut self, buf: &mut [u8], mut flags: Flags) -> Result<()> {
         if flags.contains(Flags::ACK) {
             self.state |= StreamState::Ack;
+        }
+
+        if !self.state.contains(StreamState::Syn) {
+            self.state |= StreamState::Syn;
+            flags |= Flags::SYN;
         }
 
         self.recv_buf
@@ -259,9 +266,14 @@ impl Stream {
     ///
     /// Returns [`Error::None`], if there are no more packets to send or reached the peer's flow control limits.
     /// you should call `create_data_frame()` multiple times until Done is returned.
-    fn send_data_frame(&mut self, buf: &mut [u8], flags: Flags) -> Result<usize> {
+    fn send_data_frame(&mut self, buf: &mut [u8], mut flags: Flags) -> Result<usize> {
         if flags.contains(Flags::ACK) {
             self.state |= StreamState::Ack;
+        }
+
+        if !self.state.contains(StreamState::Syn) {
+            self.state |= StreamState::Syn;
+            flags |= Flags::SYN;
         }
 
         self.send_buf.send_data_frame(buf, self.stream_id, flags)
@@ -328,7 +340,7 @@ impl Stream {
     }
 
     /// Test if the stream has enough send capacity.
-    fn sendable(&self) -> bool {
+    fn writable(&self) -> bool {
         self.send_buf.writable()
     }
 
@@ -393,6 +405,8 @@ enum SendFrame {
 }
 
 /// Session terminated reason.
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
 pub enum Reason {
     Normal,
     ProtocolError,
@@ -426,16 +440,15 @@ impl Into<u8> for Reason {
 pub struct Session {
     /// Session configured window size.
     window_size: u32,
-
+    /// next oubtound stream id.
+    next_outbound_stream_id: u32,
     /// incoming stream ids that have not yet been acknowledged.
     incoming_stream_ids: VecDeque<u32>,
-
     /// the streams handle by this session.
     streams: HashMap<u32, Stream>,
-
     /// Queue of frames waiting to be sent to peer.
     send_frames: VecDeque<SendFrame>,
-
+    /// session terminated reason.
     terminated: Option<Reason>,
 }
 
@@ -558,15 +571,85 @@ impl Session {
 
         Ok(())
     }
+
+    fn verify_session_status(&self) -> Result<()> {
+        if self.terminated.is_some() {
+            Err(Error::InvalidState)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn send_ping(&mut self, buf: &mut [u8], opaque: u32) -> Result<usize> {
+        let buf: &mut [u8; 12] = buf.try_into().unwrap();
+
+        FrameBuilder::new_with(buf)
+            .stream_id(0)
+            .flags(Flags::SYN)
+            .frame_type(FrameType::Ping)
+            .length(opaque)
+            .create_without_body()?;
+
+        Ok(12)
+    }
+
+    fn send_pong(&mut self, buf: &mut [u8], opaque: u32) -> Result<usize> {
+        let buf: &mut [u8; 12] = buf.try_into().unwrap();
+
+        FrameBuilder::new_with(buf)
+            .stream_id(0)
+            .flags(Flags::ACK)
+            .frame_type(FrameType::Ping)
+            .length(opaque)
+            .create_without_body()?;
+
+        Ok(12)
+    }
+
+    fn send_window_size(&mut self, buf: &mut [u8], stream_id: u32, flags: Flags) -> Result<usize> {
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            stream.send_window_size_update_frame(buf, flags)?;
+            Ok(12)
+        } else {
+            Err(Error::Done)
+        }
+    }
+
+    /// Returns [`Error::Done`] if stream not found.
+    fn send_data(&mut self, buf: &mut [u8], stream_id: u32, flags: Flags) -> Result<usize> {
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            let read_size = stream.send_data_frame(buf, flags)?;
+            Ok(read_size)
+        } else {
+            Err(Error::Done)
+        }
+    }
+
+    fn send_go_away(&mut self, buf: &mut [u8], reason: Reason) -> Result<usize> {
+        self.terminated = Some(reason);
+
+        let buf: &mut [u8; 12] = buf.try_into().unwrap();
+
+        let reason_u8: u8 = reason.into();
+
+        FrameBuilder::new_with(buf)
+            .stream_id(0)
+            .frame_type(FrameType::GoAway)
+            .length(reason_u8 as u32)
+            .create_without_body()?;
+
+        Ok(12)
+    }
 }
 
 impl Session {
     /// Create new session with custom window size.
-    pub fn new(window_size: u32) -> Self {
+    pub fn new(window_size: u32, is_server: bool) -> Self {
         assert!(window_size >= INIT_WINDOW_SIZE);
 
         Self {
             window_size,
+            next_outbound_stream_id: if is_server { 2 } else { 1 },
             incoming_stream_ids: Default::default(),
             streams: Default::default(),
             send_frames: Default::default(),
@@ -576,6 +659,8 @@ impl Session {
 
     /// Write new data received from peer.
     pub fn recv(&mut self, buf: &[u8]) -> Result<usize> {
+        self.verify_session_status()?;
+
         match self.recv_inner(buf) {
             Ok(read_size) => Ok(read_size),
             Err(err) => {
@@ -590,15 +675,110 @@ impl Session {
 
     /// Write new frame to be sent to peer.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize> {
-        todo!()
+        self.verify_session_status()?;
+
+        if buf.len() < 12 {
+            return Err(Error::BufferTooShort(12));
+        }
+
+        while let Some(send_frame) = self.send_frames.pop_front() {
+            match send_frame {
+                SendFrame::Ping(opaque) => return self.send_ping(buf, opaque),
+                SendFrame::Pong(opaque) => return self.send_pong(buf, opaque),
+                SendFrame::WindowUpdate { stream_id, flags } => {
+                    match self.send_window_size(buf, stream_id, flags) {
+                        Err(Error::Done) => continue,
+                        r => return r,
+                    }
+                }
+                SendFrame::Data { stream_id, flags } => {
+                    match self.send_data(buf, stream_id, flags) {
+                        Err(Error::Done) => continue,
+                        r => return r,
+                    }
+                }
+                SendFrame::GoAway(reason) => return self.send_go_away(buf, reason),
+            }
+        }
+
+        Err(Error::Done)
     }
 
     pub fn stream_send(&mut self, stream_id: u32, buf: &[u8], fin: bool) -> Result<usize> {
-        todo!()
+        self.verify_session_status()?;
+
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            let write_size = stream.send(buf, fin)?;
+
+            if write_size > 0 {}
+
+            Ok(write_size)
+        } else {
+            return Err(Error::InvalidStreamState(stream_id));
+        }
     }
 
     pub fn stream_recv(&mut self, stream_id: u32, buf: &mut [u8]) -> Result<(usize, bool)> {
-        todo!()
+        self.verify_session_status()?;
+
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
+            let read_size = stream.recv(buf)?;
+
+            return Ok((read_size, stream.is_finished()));
+        } else {
+            return Err(Error::InvalidStreamState(stream_id));
+        }
+    }
+
+    pub fn stream_writable(&self, stream_id: u32) -> Result<bool> {
+        Ok(self
+            .streams
+            .get(&stream_id)
+            .ok_or(Error::InvalidStreamState(stream_id))?
+            .writable())
+    }
+
+    /// Open a new outbound stream.
+    pub fn open(&mut self) -> Result<u32> {
+        self.verify_session_status()?;
+
+        let stream_id = self.next_outbound_stream_id;
+
+        self.next_outbound_stream_id += 2;
+
+        let stream = Stream::new(stream_id, self.window_size);
+
+        if stream.window_size_updatable() {
+            self.send_frames.push_back(SendFrame::WindowUpdate {
+                stream_id,
+                flags: Flags::SYN,
+            });
+        }
+
+        self.streams.insert(stream_id, stream);
+
+        Ok(stream_id)
+    }
+
+    pub fn accept(&mut self) -> Result<Option<u32>> {
+        self.verify_session_status()?;
+        Ok(self.incoming_stream_ids.pop_front())
+    }
+
+    /// Returns an iterator over streams that have outstanding data to read.
+    pub fn readable(&self) -> impl Iterator<Item = u32> + '_ {
+        self.streams
+            .iter()
+            .filter(|(_, stream)| stream.readable())
+            .map(|(id, _)| *id)
+    }
+
+    /// Returns an iterator over streams that can be written i
+    pub fn writable(&self) -> impl Iterator<Item = u32> + '_ {
+        self.streams
+            .iter()
+            .filter(|(_, stream)| stream.writable())
+            .map(|(id, _)| *id)
     }
 }
 
@@ -740,8 +920,10 @@ mod tests {
         // test read data.
         assert!(!stream.readable());
 
+        assert!(stream.state.contains(StreamState::Ack));
+
         let frame = FrameBuilder::new()
-            .flags(Flags::ACK)
+            .flags(Flags::none())
             .frame_type(FrameType::Data)
             .stream_id(1)
             .create(vec![0xa; 20])
@@ -750,6 +932,13 @@ mod tests {
         stream.recv_data_frame(&frame).unwrap();
 
         assert!(stream.state.contains(StreamState::Ack));
+
+        let frame = FrameBuilder::new()
+            .flags(Flags::ACK)
+            .frame_type(FrameType::Data)
+            .stream_id(1)
+            .create(vec![0xa; 20])
+            .unwrap();
 
         stream.recv_data_frame(&frame).expect_err("Recv ack twice.");
 
@@ -769,7 +958,7 @@ mod tests {
 
         assert_eq!(stream.recv(&mut buf).unwrap_err(), Error::Done);
 
-        assert!(stream.sendable());
+        assert!(stream.writable());
 
         assert_eq!(
             stream.send_data_frame(&mut buf, Flags::RST).unwrap_err(),
