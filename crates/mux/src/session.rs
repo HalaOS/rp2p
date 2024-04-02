@@ -3,8 +3,6 @@ use std::{
     collections::{HashMap, VecDeque},
 };
 
-use bitmask_enum::bitmask;
-
 use crate::{
     ring_buf::RingBuf, Error, Flags, Frame, FrameBuilder, FrameHeaderBuilder, FrameType, Result,
 };
@@ -196,30 +194,10 @@ impl SendBuf {
     }
 }
 
-#[bitmask(u8)]
-enum StreamState {
-    /// Default flag bit at creation
-    Read,
-    /// Default flag bit at creation
-    Write,
-    /// Reset flag, set by local or peer.
-    RST,
-    /// Syn flag, set by local.
-    SYN,
-    /// Acknowledged flag, set by local or peer.
-    ACK,
-}
-
-impl Default for StreamState {
-    fn default() -> Self {
-        Self::Read | Self::Write
-    }
-}
-
 /// A logical stream type.
 struct Stream {
     stream_id: u32,
-    state: StreamState,
+    flags: Flags,
     recv_buf: RecvBuf,
     send_buf: SendBuf,
     is_server: bool,
@@ -231,7 +209,7 @@ impl Stream {
         Self {
             stream_id,
             is_server,
-            state: Default::default(),
+            flags: Flags::none(),
             recv_buf: RecvBuf::new(window_size),
             send_buf: SendBuf::new(window_size as usize),
         }
@@ -269,7 +247,7 @@ impl Stream {
 
         let send_size = self.send_buf.send_data_frame(buf, self.stream_id, flags)?;
 
-        if !self.state.contains(StreamState::Write) && self.send_buf.remaining() == 0 {
+        if self.flags.contains(Flags::FIN) && self.send_buf.remaining() == 0 {
             let buf: &mut [u8; 12] = (&mut buf[..12]).try_into().unwrap();
 
             flags |= Flags::FIN;
@@ -282,14 +260,14 @@ impl Stream {
     }
 
     fn send_flags_adjustment(&mut self, flags: &mut Flags) -> Result<()> {
-        if !self.state.contains(StreamState::SYN) && !self.is_server {
+        if !self.flags.contains(Flags::SYN) && !self.is_server {
             *flags |= Flags::SYN;
-            self.state |= StreamState::SYN;
+            self.flags |= Flags::SYN;
         }
 
-        if !self.state.contains(StreamState::ACK) && self.is_server {
-            self.state |= StreamState::ACK;
+        if !self.flags.contains(Flags::ACK) && self.is_server {
             *flags |= Flags::ACK;
+            self.flags |= Flags::ACK;
         }
 
         Ok(())
@@ -326,30 +304,30 @@ impl Stream {
 
     fn stream_state_adjustment(&mut self, flags: Flags) -> Result<()> {
         if flags.contains(Flags::ACK) {
-            if self.state.contains(StreamState::ACK) {
+            if self.flags.contains(Flags::ACK) {
                 log::error!("ACK same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
 
-            self.state |= StreamState::ACK;
+            self.flags |= Flags::ACK;
         }
 
         if flags.contains(Flags::FIN) {
-            if !self.state.contains(StreamState::Read) {
+            if !self.flags.contains(Flags::FIN) {
                 log::error!("FIN same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
 
-            self.state ^= StreamState::Read;
+            self.flags |= Flags::FIN;
         }
 
         if flags.contains(Flags::RST) {
-            if self.state.contains(StreamState::RST) {
+            if self.flags.contains(Flags::RST) {
                 log::error!("RST same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
 
-            self.state |= StreamState::RST;
+            self.flags |= Flags::RST;
         }
 
         Ok(())
@@ -372,7 +350,7 @@ impl Stream {
     ///
     /// Returns [`Error::InvalidStreamState`], When the fin flag is set for a second time.
     fn send(&mut self, buf: &[u8], fin: bool) -> Result<usize> {
-        if self.state.contains(StreamState::RST) {
+        if self.flags.contains(Flags::RST) {
             log::error!(
                 "Send data after reset by peer, stream_id={}",
                 self.stream_id
@@ -382,13 +360,13 @@ impl Stream {
         }
 
         if fin {
-            if !self.state.contains(StreamState::Write) {
+            if self.flags.contains(Flags::FIN) {
                 log::error!("Set fin flag twice, stream_id={}", self.stream_id);
                 return Err(Error::FinalSize(self.stream_id));
             }
 
-            self.state ^= StreamState::Write;
-        } else if !self.state.contains(StreamState::Write) {
+            self.flags |= Flags::FIN;
+        } else if self.flags.contains(Flags::FIN) {
             log::error!("Send data after set fin flag, stream_id={}", self.stream_id);
             return Err(Error::FinalSize(self.stream_id));
         }
@@ -413,15 +391,16 @@ impl Stream {
             return false;
         }
 
-        if !self.state.contains(StreamState::Read) || self.state.contains(StreamState::RST) {
+        if self.flags.contains(Flags::FIN) || self.flags.contains(Flags::RST) {
             return true;
         }
 
-        return false;
+        false
     }
 }
 
 enum SendFrame {
+    #[allow(unused)]
     Ping(u32),
     Pong(u32),
     WindowUpdate(u32),
@@ -939,7 +918,7 @@ mod tests {
 
         assert_eq!(stream.send(&buf, true).unwrap_err(), Error::FinalSize(1));
 
-        assert!(!stream.state.contains(StreamState::Write));
+        assert!(stream.flags.contains(Flags::FIN));
 
         let mut buf = vec![0x0; 200];
 
@@ -964,9 +943,9 @@ mod tests {
         let (frame, _) = Frame::parse(&buf).unwrap();
         stream.recv_data_frame(&frame).unwrap();
 
-        assert!(stream.state.contains(StreamState::ACK));
-        assert!(stream.state.contains(StreamState::RST));
-        assert!(!stream.state.contains(StreamState::Write));
+        assert!(stream.flags.contains(Flags::ACK));
+        assert!(stream.flags.contains(Flags::RST));
+        assert!(stream.flags.contains(Flags::FIN));
 
         assert_eq!(
             stream.send(&buf, false).unwrap_err(),
@@ -976,12 +955,11 @@ mod tests {
 
     #[test]
     fn test_server_stream() {
-        let mut stream = Stream::new(1, INIT_WINDOW_SIZE, true);
+        let stream = Stream::new(1, INIT_WINDOW_SIZE, true);
 
         assert!(!stream.window_size_updatable());
 
-        assert!(!stream.state.contains(StreamState::SYN));
-        assert!(stream.state.contains(StreamState::Read));
-        assert!(stream.state.contains(StreamState::Write));
+        assert!(!stream.flags.contains(Flags::SYN));
+        assert!(!stream.flags.contains(Flags::FIN));
     }
 }
