@@ -973,4 +973,15 @@ mod tests {
             Error::InvalidStreamState(1)
         );
     }
+
+    #[test]
+    fn test_server_stream() {
+        let mut stream = Stream::new(1, INIT_WINDOW_SIZE, true);
+
+        assert!(!stream.window_size_updatable());
+
+        assert!(!stream.state.contains(StreamState::SYN));
+        assert!(stream.state.contains(StreamState::Read));
+        assert!(stream.state.contains(StreamState::Write));
+    }
 }
