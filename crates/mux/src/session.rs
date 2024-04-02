@@ -168,9 +168,9 @@ impl SendBuf {
         Ok(read_len)
     }
 
-    /// Tests if a `DATA_FRAME` can be sent.
-    fn sendable(&self) -> bool {
-        min(self.window_size, self.ring_buf.remaining() as u32) > 0
+    /// Tests the amount of data that can be sent.
+    fn remaining(&self) -> usize {
+        self.ring_buf.remaining()
     }
 
     /// Test if the send buf has enough capacity.
@@ -203,11 +203,11 @@ enum StreamState {
     /// Default flag bit at creation
     Write,
     /// Reset flag, set by local or peer.
-    Reset,
+    RST,
     /// Syn flag, set by local.
-    Syn,
+    SYN,
     /// Acknowledged flag, set by local or peer.
-    Ack,
+    ACK,
 }
 
 impl Default for StreamState {
@@ -222,13 +222,15 @@ struct Stream {
     state: StreamState,
     recv_buf: RecvBuf,
     send_buf: SendBuf,
+    is_server: bool,
 }
 
 impl Stream {
     /// Create `stream` with custom window size.
-    fn new(stream_id: u32, window_size: u32) -> Self {
+    fn new(stream_id: u32, window_size: u32, is_server: bool) -> Self {
         Self {
             stream_id,
+            is_server,
             state: Default::default(),
             recv_buf: RecvBuf::new(window_size),
             send_buf: SendBuf::new(window_size as usize),
@@ -248,15 +250,9 @@ impl Stream {
     /// Returns [`Error::Done`] if delta_window_size is zero.
     /// you should first call [`Self::window_size_updatable`] before calling
     /// this function to check if you need to send a `WINDOW_UPDATE_FRAME`.
-    fn send_window_size_update_frame(&mut self, buf: &mut [u8], mut flags: Flags) -> Result<()> {
-        if flags.contains(Flags::ACK) {
-            self.state |= StreamState::Ack;
-        }
-
-        if !self.state.contains(StreamState::Syn) {
-            self.state |= StreamState::Syn;
-            flags |= Flags::SYN;
-        }
+    fn send_window_size_update_frame(&mut self, buf: &mut [u8]) -> Result<()> {
+        let mut flags = Flags::none();
+        self.send_flags_adjustment(&mut flags)?;
 
         self.recv_buf
             .send_window_update_frame(buf, self.stream_id, flags)
@@ -266,23 +262,43 @@ impl Stream {
     ///
     /// Returns [`Error::None`], if there are no more packets to send or reached the peer's flow control limits.
     /// you should call `create_data_frame()` multiple times until Done is returned.
-    fn send_data_frame(&mut self, buf: &mut [u8], mut flags: Flags) -> Result<usize> {
-        if flags.contains(Flags::ACK) {
-            self.state |= StreamState::Ack;
+    fn send_data_frame(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let mut flags = Flags::none();
+
+        self.send_flags_adjustment(&mut flags)?;
+
+        let send_size = self.send_buf.send_data_frame(buf, self.stream_id, flags)?;
+
+        if !self.state.contains(StreamState::Write) && self.send_buf.remaining() == 0 {
+            let buf: &mut [u8; 12] = (&mut buf[..12]).try_into().unwrap();
+
+            flags |= Flags::FIN;
+
+            // update flags ad FIN flag.
+            FrameHeaderBuilder::with(buf).flags(flags);
         }
 
-        if !self.state.contains(StreamState::Syn) {
-            self.state |= StreamState::Syn;
-            flags |= Flags::SYN;
+        Ok(send_size)
+    }
+
+    fn send_flags_adjustment(&mut self, flags: &mut Flags) -> Result<()> {
+        if !self.state.contains(StreamState::SYN) && !self.is_server {
+            *flags |= Flags::SYN;
+            self.state |= StreamState::SYN;
         }
 
-        self.send_buf.send_data_frame(buf, self.stream_id, flags)
+        if !self.state.contains(StreamState::ACK) && self.is_server {
+            self.state |= StreamState::ACK;
+            *flags |= Flags::ACK;
+        }
+
+        Ok(())
     }
 
     /// Receive a window update frame from peer.
     fn recv_window_update_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
         let flags = frame.header.flags()?;
-        self.update_flags(flags)?;
+        self.stream_state_adjustment(flags)?;
 
         self.send_buf.update_window_size(frame.header.length());
 
@@ -297,10 +313,10 @@ impl Stream {
     fn recv_data_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
         let flags = frame.header.flags()?;
 
-        self.update_flags(flags)?;
-
         if let Some(body) = &frame.body {
             self.recv_buf.write(body)?;
+
+            self.stream_state_adjustment(flags)?;
         } else {
             return Err(Error::InvalidFrame(crate::InvalidFrameKind::Body));
         }
@@ -308,14 +324,14 @@ impl Stream {
         Ok(())
     }
 
-    fn update_flags(&mut self, flags: Flags) -> Result<()> {
+    fn stream_state_adjustment(&mut self, flags: Flags) -> Result<()> {
         if flags.contains(Flags::ACK) {
-            if self.state.contains(StreamState::Ack) {
+            if self.state.contains(StreamState::ACK) {
                 log::error!("ACK same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
 
-            self.state |= StreamState::Ack;
+            self.state |= StreamState::ACK;
         }
 
         if flags.contains(Flags::FIN) {
@@ -328,12 +344,12 @@ impl Stream {
         }
 
         if flags.contains(Flags::RST) {
-            if self.state.contains(StreamState::Reset) {
+            if self.state.contains(StreamState::RST) {
                 log::error!("RST same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
 
-            self.state |= StreamState::Reset;
+            self.state |= StreamState::RST;
         }
 
         Ok(())
@@ -356,6 +372,15 @@ impl Stream {
     ///
     /// Returns [`Error::InvalidStreamState`], When the fin flag is set for a second time.
     fn send(&mut self, buf: &[u8], fin: bool) -> Result<usize> {
+        if self.state.contains(StreamState::RST) {
+            log::error!(
+                "Send data after reset by peer, stream_id={}",
+                self.stream_id
+            );
+
+            return Err(Error::InvalidStreamState(self.stream_id));
+        }
+
         if fin {
             if !self.state.contains(StreamState::Write) {
                 log::error!("Set fin flag twice, stream_id={}", self.stream_id);
@@ -388,7 +413,7 @@ impl Stream {
             return false;
         }
 
-        if !self.state.contains(StreamState::Read) || self.state.contains(StreamState::Reset) {
+        if !self.state.contains(StreamState::Read) || self.state.contains(StreamState::RST) {
             return true;
         }
 
@@ -399,8 +424,8 @@ impl Stream {
 enum SendFrame {
     Ping(u32),
     Pong(u32),
-    WindowUpdate { stream_id: u32, flags: Flags },
-    Data { stream_id: u32, flags: Flags },
+    WindowUpdate(u32),
+    Data(u32),
     GoAway(Reason),
 }
 
@@ -477,14 +502,15 @@ impl Session {
             stream.recv_data_frame(frame)?;
         } else {
             if flags.contains(Flags::SYN) {
-                let mut stream = Stream::new(stream_id, self.window_size);
+                let mut stream = Stream::new(stream_id, self.window_size, true);
+
                 stream.recv_data_frame(frame)?;
 
                 if stream.window_size_updatable() {
-                    self.send_frames.push_back(SendFrame::WindowUpdate {
-                        stream_id,
-                        flags: Flags::ACK,
-                    });
+                    self.send_frames
+                        .push_back(SendFrame::WindowUpdate(stream_id));
+
+                    stream.stream_state_adjustment(Flags::ACK)?;
                 }
             } else {
                 // terminate the session.
@@ -507,14 +533,14 @@ impl Session {
             stream.recv_data_frame(frame)?;
         } else {
             if flags.contains(Flags::SYN) {
-                let mut stream = Stream::new(stream_id, self.window_size);
+                let mut stream = Stream::new(stream_id, self.window_size, true);
                 stream.recv_window_update_frame(frame)?;
 
                 if stream.window_size_updatable() {
-                    self.send_frames.push_back(SendFrame::WindowUpdate {
-                        stream_id,
-                        flags: Flags::ACK,
-                    });
+                    self.send_frames
+                        .push_back(SendFrame::WindowUpdate(stream_id));
+
+                    stream.stream_state_adjustment(Flags::ACK)?;
                 }
             } else {
                 // terminate the session.
@@ -606,9 +632,9 @@ impl Session {
         Ok(12)
     }
 
-    fn send_window_size(&mut self, buf: &mut [u8], stream_id: u32, flags: Flags) -> Result<usize> {
+    fn send_window_size(&mut self, buf: &mut [u8], stream_id: u32) -> Result<usize> {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.send_window_size_update_frame(buf, flags)?;
+            stream.send_window_size_update_frame(buf)?;
             Ok(12)
         } else {
             Err(Error::Done)
@@ -616,9 +642,9 @@ impl Session {
     }
 
     /// Returns [`Error::Done`] if stream not found.
-    fn send_data(&mut self, buf: &mut [u8], stream_id: u32, flags: Flags) -> Result<usize> {
+    fn send_data(&mut self, buf: &mut [u8], stream_id: u32) -> Result<usize> {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
-            let read_size = stream.send_data_frame(buf, flags)?;
+            let read_size = stream.send_data_frame(buf)?;
             Ok(read_size)
         } else {
             Err(Error::Done)
@@ -668,12 +694,12 @@ impl Session {
                 self.send_frames
                     .push_back(SendFrame::GoAway(Reason::ProtocolError));
 
-                return Err(err);
+                Err(err)
             }
         }
     }
 
-    /// Write new frame to be sent to peer.
+    /// Write new frame to be sent to peer into provided slice.
     pub fn send(&mut self, buf: &mut [u8]) -> Result<usize> {
         self.verify_session_status()?;
 
@@ -685,18 +711,14 @@ impl Session {
             match send_frame {
                 SendFrame::Ping(opaque) => return self.send_ping(buf, opaque),
                 SendFrame::Pong(opaque) => return self.send_pong(buf, opaque),
-                SendFrame::WindowUpdate { stream_id, flags } => {
-                    match self.send_window_size(buf, stream_id, flags) {
-                        Err(Error::Done) => continue,
-                        r => return r,
-                    }
-                }
-                SendFrame::Data { stream_id, flags } => {
-                    match self.send_data(buf, stream_id, flags) {
-                        Err(Error::Done) => continue,
-                        r => return r,
-                    }
-                }
+                SendFrame::WindowUpdate(stream_id) => match self.send_window_size(buf, stream_id) {
+                    Err(Error::Done) => continue,
+                    r => return r,
+                },
+                SendFrame::Data(stream_id) => match self.send_data(buf, stream_id) {
+                    Err(Error::Done) => continue,
+                    r => return r,
+                },
                 SendFrame::GoAway(reason) => return self.send_go_away(buf, reason),
             }
         }
@@ -710,11 +732,13 @@ impl Session {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             let write_size = stream.send(buf, fin)?;
 
-            if write_size > 0 {}
+            if write_size > 0 {
+                self.send_frames.push_back(SendFrame::Data(stream_id));
+            }
 
             Ok(write_size)
         } else {
-            return Err(Error::InvalidStreamState(stream_id));
+            Err(Error::InvalidStreamState(stream_id))
         }
     }
 
@@ -724,9 +748,9 @@ impl Session {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             let read_size = stream.recv(buf)?;
 
-            return Ok((read_size, stream.is_finished()));
+            Ok((read_size, stream.is_finished()))
         } else {
-            return Err(Error::InvalidStreamState(stream_id));
+            Err(Error::InvalidStreamState(stream_id))
         }
     }
 
@@ -746,13 +770,11 @@ impl Session {
 
         self.next_outbound_stream_id += 2;
 
-        let stream = Stream::new(stream_id, self.window_size);
+        let stream = Stream::new(stream_id, self.window_size, false);
 
         if stream.window_size_updatable() {
-            self.send_frames.push_back(SendFrame::WindowUpdate {
-                stream_id,
-                flags: Flags::SYN,
-            });
+            self.send_frames
+                .push_back(SendFrame::WindowUpdate(stream_id));
         }
 
         self.streams.insert(stream_id, stream);
@@ -885,118 +907,70 @@ mod tests {
     }
 
     #[test]
-    fn test_stream() {
-        let stream = Stream::new(1, INIT_WINDOW_SIZE);
-
-        assert!(stream.state.contains(StreamState::Read));
-        assert!(stream.state.contains(StreamState::Write));
-        assert!(!stream.is_finished());
-
-        assert!(!stream.window_size_updatable());
-
-        let mut stream = Stream::new(1, INIT_WINDOW_SIZE * 2);
+    fn test_client_stream() {
+        let mut stream = Stream::new(1, INIT_WINDOW_SIZE * 2, false);
 
         assert!(stream.window_size_updatable());
 
         let mut buf = vec![0; 12];
 
-        stream
-            .send_window_size_update_frame(&mut buf, Flags::ACK | Flags::FIN)
-            .unwrap();
+        stream.send_window_size_update_frame(&mut buf).unwrap();
 
         assert!(!stream.window_size_updatable());
 
         let (frame, _) = Frame::parse(&buf).unwrap();
 
-        assert_eq!(frame.header.frame_type().unwrap(), FrameType::WindowUpdate);
-
         let flags = frame.header.flags().unwrap();
 
-        assert!(flags.contains(Flags::ACK));
-        assert!(flags.contains(Flags::FIN));
+        assert!(flags.contains(Flags::SYN));
 
-        assert_eq!(frame.header.length(), INIT_WINDOW_SIZE);
-
-        // test read data.
-        assert!(!stream.readable());
-
-        assert!(stream.state.contains(StreamState::Ack));
-
-        let frame = FrameBuilder::new()
-            .flags(Flags::none())
-            .frame_type(FrameType::Data)
-            .stream_id(1)
-            .create(vec![0xa; 20])
-            .unwrap();
-
-        stream.recv_data_frame(&frame).unwrap();
-
-        assert!(stream.state.contains(StreamState::Ack));
-
-        let frame = FrameBuilder::new()
-            .flags(Flags::ACK)
-            .frame_type(FrameType::Data)
-            .stream_id(1)
-            .create(vec![0xa; 20])
-            .unwrap();
-
-        stream.recv_data_frame(&frame).expect_err("Recv ack twice.");
-
-        assert!(stream.readable());
-
-        let mut buf = vec![0; 10];
-
-        assert_eq!(stream.recv(&mut buf).unwrap(), buf.len());
-
-        assert_eq!(buf, vec![0x0a; 10]);
-
-        let mut buf = vec![0; 30];
-
-        assert_eq!(stream.recv(&mut buf).unwrap(), 10);
-
-        assert_eq!(buf[0..10], vec![0x0a; 10]);
-
-        assert_eq!(stream.recv(&mut buf).unwrap_err(), Error::Done);
+        assert_eq!(
+            stream.send_window_size_update_frame(&mut buf).unwrap_err(),
+            Error::Done
+        );
 
         assert!(stream.writable());
 
-        assert_eq!(
-            stream.send_data_frame(&mut buf, Flags::RST).unwrap_err(),
-            Error::Done
-        );
+        assert!(!stream.is_finished());
 
-        stream.send(&[0x10; 100], false).unwrap();
+        let buf = vec![0x0a; 100];
 
-        let mut buf = vec![0x0; 92];
+        stream.send(&buf, true).unwrap();
 
-        stream.send_data_frame(&mut buf, Flags::none()).unwrap();
+        assert_eq!(stream.send(&buf, true).unwrap_err(), Error::FinalSize(1));
+
+        assert!(!stream.state.contains(StreamState::Write));
+
+        let mut buf = vec![0x0; 200];
+
+        assert_eq!(stream.send_data_frame(&mut buf).unwrap(), 112);
+
+        {
+            let (frame, _) = Frame::parse(&buf).unwrap();
+
+            let flags = frame.header.flags().unwrap();
+
+            assert!(flags.contains(Flags::FIN));
+            assert_eq!(frame.header.frame_type().unwrap(), FrameType::Data);
+            assert_eq!(frame.header.stream_id(), 1);
+            assert_eq!(frame.header.length(), 100);
+        }
+
+        FrameHeaderBuilder::with((&mut buf[..12]).try_into().unwrap())
+            .flags(Flags::ACK | Flags::RST)
+            .valid()
+            .unwrap();
 
         let (frame, _) = Frame::parse(&buf).unwrap();
+        stream.recv_data_frame(&frame).unwrap();
 
-        assert_eq!(frame.header.frame_type().unwrap(), FrameType::Data);
-
-        assert_eq!(frame.header.length(), 80);
-
-        assert_eq!(frame.body.unwrap(), vec![0x10; 80]);
-
-        let mut buf = vec![0x0; 92];
-
-        assert_eq!(stream.send_data_frame(&mut buf, Flags::none()).unwrap(), 32);
-
-        let (frame, _) = Frame::parse(&buf).unwrap();
-
-        assert_eq!(frame.body.unwrap(), vec![0x10; 20]);
+        assert!(stream.state.contains(StreamState::ACK));
+        assert!(stream.state.contains(StreamState::RST));
+        assert!(!stream.state.contains(StreamState::Write));
 
         assert_eq!(
-            stream.send_data_frame(&mut buf, Flags::RST).unwrap_err(),
-            Error::Done
-        );
-
-        assert_eq!(
-            stream
-                .send(&[0x10; INIT_WINDOW_SIZE as usize * 3], true)
-                .unwrap(),
-            INIT_WINDOW_SIZE as usize * 2
+            stream.send(&buf, false).unwrap_err(),
+            Error::InvalidStreamState(1)
         );
     }
 }
