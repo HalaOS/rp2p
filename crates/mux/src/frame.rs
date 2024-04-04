@@ -374,6 +374,16 @@ pub struct Frame<'a> {
 }
 
 impl<'a> Frame<'a> {
+    /// Create new [`FrameBuilder`] instance to build `Frame` instance.
+    pub fn build() -> FrameBuilder<'static> {
+        FrameBuilder::new()
+    }
+
+    /// create new [`FrameBuilder`] instance with provided buf to build `Frame` instance.
+    pub fn build_with(buf: &'a mut [u8; 12]) -> FrameBuilder<'a> {
+        FrameBuilder::Borrowed(buf)
+    }
+
     /// Parse frame from input contiguous data.
     ///
     /// Returns [`Error::BufferTooShort`],if the input buf too short to parse a whole frame,
@@ -416,6 +426,7 @@ impl<'a> Frame<'a> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
