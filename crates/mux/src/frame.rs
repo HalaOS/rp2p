@@ -177,7 +177,6 @@ impl<'a> FrameHeaderBuilder<'a> {
         let header = FrameHeader::Borrowed(self.0);
 
         let flags = header.flags()?;
-        let length = header.length();
 
         match header.frame_type()? {
             FrameType::Ping => {
@@ -200,13 +199,9 @@ impl<'a> FrameHeaderBuilder<'a> {
                     return Err(Error::FrameRestriction(FrameRestrictionKind::SessionId));
                 }
             }
-            t => {
+            _ => {
                 if header.stream_id() == 0 {
                     return Err(Error::FrameRestriction(FrameRestrictionKind::SessionId));
-                }
-
-                if t == FrameType::Data && length == 0 {
-                    return Err(Error::FrameRestriction(FrameRestrictionKind::Body));
                 }
             }
         }

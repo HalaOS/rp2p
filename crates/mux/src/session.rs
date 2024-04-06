@@ -103,8 +103,8 @@ impl RecvBuf {
         Ok(())
     }
 
-    fn window_size_updatable(&self) -> bool {
-        self.delta_window_size > 0
+    fn delta_window_size(&self) -> u32 {
+        self.delta_window_size
     }
 }
 
@@ -201,6 +201,7 @@ struct Stream {
     recv_buf: RecvBuf,
     send_buf: SendBuf,
     is_server: bool,
+    window_size: u32,
 }
 
 impl Stream {
@@ -209,6 +210,7 @@ impl Stream {
         Self {
             stream_id,
             is_server,
+            window_size,
             flags: Flags::none(),
             recv_buf: RecvBuf::new(window_size),
             send_buf: SendBuf::new(window_size as usize),
@@ -217,7 +219,7 @@ impl Stream {
 
     /// Check if nees send WINDOW_UPDATE_FRAME frame.
     fn window_size_updatable(&self) -> bool {
-        self.recv_buf.window_size_updatable()
+        self.recv_buf.delta_window_size() >= self.window_size / 2
     }
 
     ///Create new `WINDOW_UPDATE_FRAME` to be sent to peer.
@@ -356,7 +358,7 @@ impl Stream {
                 self.stream_id
             );
 
-            return Err(Error::InvalidStreamState(self.stream_id));
+            return Err(Error::StreamReset(self.stream_id));
         }
 
         if fin {
@@ -705,6 +707,18 @@ impl Session {
         Err(Error::Done)
     }
 
+    /// Writes data to a stream.
+    ///
+    /// On success the number of bytes written is returned,
+    /// or Done if no data was written (e.g. because the stream has no capacity).
+    ///
+    /// Applications can provide a 0-length buffer with the fin flag set to true.
+    /// This will lead to a 0-length DATA_FRAME with FIN flag being sent at the latest offset.
+    /// The Ok(0) value is only returned when the application provided a 0-length buffer.
+    ///
+    /// In addition, if the peer has signalled that it doesn’t want to receive any more data from this
+    /// stream by sending the *-FRAME with RST flags, the [`StreamReset`](Error::StreamReset) error will
+    /// be returned instead of any data.
     pub fn stream_send(&mut self, stream_id: u32, buf: &[u8], fin: bool) -> Result<usize> {
         self.verify_session_status()?;
 
@@ -721,11 +735,24 @@ impl Session {
         }
     }
 
+    /// Reads contiguous data from a stream into the provided slice.
+    ///
+    /// The slice must be sized by the caller and will be populated up to its capacity.
+    ///
+    /// On success the amount of bytes read and a flag indicating the fin state is returned as a tuple, or Done if there is no data to read.
+    ///
+    /// Reading data from a stream may trigger queueing of control messages (e.g. WINDOW_UPDATE_FRAME). send() should be called after reading.
+
     pub fn stream_recv(&mut self, stream_id: u32, buf: &mut [u8]) -> Result<(usize, bool)> {
         self.verify_session_status()?;
 
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             let read_size = stream.recv(buf)?;
+
+            if stream.window_size_updatable() {
+                self.send_frames
+                    .push_back(SendFrame::WindowUpdate(stream_id));
+            }
 
             Ok((read_size, stream.is_finished()))
         } else {
@@ -733,6 +760,7 @@ impl Session {
         }
     }
 
+    /// Returns true if the stream has enough send capacity.
     pub fn stream_writable(&self, stream_id: u32) -> Result<bool> {
         Ok(self
             .streams
@@ -742,6 +770,8 @@ impl Session {
     }
 
     /// Open a new outbound stream.
+    ///
+    /// On success, returns the opened stream id.
     pub fn open(&mut self) -> Result<u32> {
         self.verify_session_status()?;
 
@@ -761,6 +791,11 @@ impl Session {
         Ok(stream_id)
     }
 
+    /// Accept a newly incoming stream.
+    ///
+    /// On success, returns the newly incoming stream id or returns None if there are no more new incoming streams.
+    ///
+    /// Returns [`Error::InvalidState`], if check the session state failed.
     pub fn accept(&mut self) -> Result<Option<u32>> {
         self.verify_session_status()?;
         Ok(self.incoming_stream_ids.pop_front())
@@ -774,7 +809,7 @@ impl Session {
             .map(|(id, _)| *id)
     }
 
-    /// Returns an iterator over streams that can be written i
+    /// Returns an iterator over streams that can be written.
     pub fn writable(&self) -> impl Iterator<Item = u32> + '_ {
         self.streams
             .iter()
@@ -947,19 +982,39 @@ mod tests {
         assert!(stream.flags.contains(Flags::RST));
         assert!(stream.flags.contains(Flags::FIN));
 
-        assert_eq!(
-            stream.send(&buf, false).unwrap_err(),
-            Error::InvalidStreamState(1)
-        );
+        assert_eq!(stream.send(&buf, false).unwrap_err(), Error::StreamReset(1));
     }
 
     #[test]
     fn test_server_stream() {
-        let stream = Stream::new(1, INIT_WINDOW_SIZE, true);
+        let mut stream = Stream::new(1, INIT_WINDOW_SIZE, true);
 
         assert!(!stream.window_size_updatable());
 
         assert!(!stream.flags.contains(Flags::SYN));
         assert!(!stream.flags.contains(Flags::FIN));
+        assert!(!stream.flags.contains(Flags::ACK));
+
+        stream.send(b"hello world", true).unwrap();
+
+        assert!(!stream.flags.contains(Flags::SYN));
+        assert!(!stream.flags.contains(Flags::ACK));
+        assert!(stream.flags.contains(Flags::FIN));
+
+        let mut buf = vec![0; 100];
+
+        stream.send_data_frame(&mut buf).unwrap();
+
+        let (frame, _) = Frame::parse(&buf).unwrap();
+
+        let flags = frame.header.flags().unwrap();
+        let frame_type = frame.header.frame_type().unwrap();
+
+        assert!(flags.contains(Flags::ACK));
+        assert!(flags.contains(Flags::FIN));
+
+        assert_eq!(frame_type, FrameType::Data);
+
+        assert_eq!(frame.header.length(), 11);
     }
 }
