@@ -315,7 +315,7 @@ impl Stream {
         }
 
         if flags.contains(Flags::FIN) {
-            if !self.flags.contains(Flags::FIN) {
+            if self.flags.contains(Flags::FIN) {
                 log::error!("FIN same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
@@ -493,6 +493,9 @@ impl Session {
 
                     stream.stream_state_adjustment(Flags::ACK)?;
                 }
+
+                self.streams.insert(stream_id, stream);
+                self.incoming_stream_ids.push_back(stream_id);
             } else {
                 // terminate the session.
                 self.send_frames
@@ -523,6 +526,9 @@ impl Session {
 
                     stream.stream_state_adjustment(Flags::ACK)?;
                 }
+
+                self.streams.insert(stream_id, stream);
+                self.incoming_stream_ids.push_back(stream_id);
             } else {
                 // terminate the session.
                 self.send_frames
@@ -816,6 +822,19 @@ impl Session {
             .filter(|(_, stream)| stream.writable())
             .map(|(id, _)| *id)
     }
+
+    /// Returns true if all the data has been read from the specified stream.
+    ///
+    /// This instructs the application that all the data received from the peer on the stream has been read, and there won’t be anymore in the future.
+    ///
+    /// Basically this returns true when the peer either set the fin flag for the stream, or sent *_FRAME with RST flag.
+    pub fn stream_finished(&self, stream_id: u32) -> bool {
+        if let Some(stream) = self.streams.get(&stream_id) {
+            stream.is_finished()
+        } else {
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1016,5 +1035,43 @@ mod tests {
         assert_eq!(frame_type, FrameType::Data);
 
         assert_eq!(frame.header.length(), 11);
+    }
+
+    #[test]
+    fn test_session() {
+        let mut client = Session::new(INIT_WINDOW_SIZE * 2, false);
+        let mut server = Session::new(INIT_WINDOW_SIZE, true);
+
+        let stream_id = client.open().unwrap();
+
+        let mut buf = vec![0; 1024];
+
+        // send WINDOW_UPDATE_FRAME.
+        let send_size = client.send(&mut buf).unwrap();
+
+        assert_eq!(server.recv(&buf[0..send_size]).unwrap(), send_size);
+
+        assert_eq!(server.accept().unwrap().unwrap(), stream_id);
+
+        server.stream_send(stream_id, b"hello world", true).unwrap();
+
+        assert_eq!(
+            server
+                .stream_send(stream_id, b"hello world", true)
+                .unwrap_err(),
+            Error::FinalSize(stream_id)
+        );
+
+        let send_size = server.send(&mut buf).unwrap();
+
+        assert_eq!(client.recv(&buf).unwrap(), send_size);
+
+        assert_eq!(client.readable().next(), Some(stream_id));
+
+        assert_eq!(client.stream_recv(stream_id, &mut buf).unwrap(), (11, true));
+
+        assert_eq!(&buf[..11], b"hello world");
+
+        assert!(client.stream_finished(stream_id));
     }
 }
