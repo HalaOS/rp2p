@@ -3,9 +3,7 @@ use std::{
     collections::{HashMap, VecDeque},
 };
 
-use crate::{
-    ring_buf::RingBuf, Error, Flags, Frame, FrameBuilder, FrameHeaderBuilder, FrameType, Result,
-};
+use crate::{ring_buf::RingBuf, Error, Flags, Frame, FrameHeaderBuilder, FrameType, Result};
 
 /// When Yamux is initially starts each stream with a 256KB window size.
 const INIT_WINDOW_SIZE: u32 = 256 * 1024;
@@ -90,13 +88,12 @@ impl RecvBuf {
 
         let buf: &mut [u8; 12] = (&mut buf[0..12]).try_into().unwrap();
 
-        let _ = FrameBuilder::new_with(buf)
+        let _ = FrameHeaderBuilder::with(buf)
             .stream_id(stream_id)
             .frame_type(FrameType::WindowUpdate)
             .flags(flags)
             .length(self.delta_window_size)
-            // This function must be called to check the frame header constraints.
-            .create_without_body()?;
+            .valid()?;
 
         self.delta_window_size = 0;
 
@@ -596,12 +593,12 @@ impl Session {
     fn send_ping(&mut self, buf: &mut [u8], opaque: u32) -> Result<usize> {
         let buf: &mut [u8; 12] = buf.try_into().unwrap();
 
-        FrameBuilder::new_with(buf)
+        FrameHeaderBuilder::with(buf)
             .stream_id(0)
             .flags(Flags::SYN)
             .frame_type(FrameType::Ping)
             .length(opaque)
-            .create_without_body()?;
+            .valid()?;
 
         Ok(12)
     }
@@ -609,12 +606,12 @@ impl Session {
     fn send_pong(&mut self, buf: &mut [u8], opaque: u32) -> Result<usize> {
         let buf: &mut [u8; 12] = buf.try_into().unwrap();
 
-        FrameBuilder::new_with(buf)
+        FrameHeaderBuilder::with(buf)
             .stream_id(0)
             .flags(Flags::ACK)
             .frame_type(FrameType::Ping)
             .length(opaque)
-            .create_without_body()?;
+            .valid()?;
 
         Ok(12)
     }
@@ -645,11 +642,11 @@ impl Session {
 
         let reason_u8: u8 = reason.into();
 
-        FrameBuilder::new_with(buf)
+        FrameHeaderBuilder::with(buf)
             .stream_id(0)
             .frame_type(FrameType::GoAway)
             .length(reason_u8 as u32)
-            .create_without_body()?;
+            .valid()?;
 
         Ok(12)
     }
