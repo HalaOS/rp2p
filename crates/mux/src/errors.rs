@@ -1,3 +1,6 @@
+use std::io;
+
+use rasi_ext::future::event_map::EventStatus;
 use thiserror::Error;
 
 /// Yamux errors type.
@@ -82,3 +85,13 @@ pub enum FrameRestrictionKind {
 
 /// A specialized [`Result`](std::result::Result) type for yamux operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<Error> for io::Error {
+    fn from(value: Error) -> Self {
+        io::Error::new(io::ErrorKind::Other, value.to_string())
+    }
+}
+
+pub(crate) fn map_event_status(status: EventStatus) -> io::Error {
+    io::Error::new(io::ErrorKind::BrokenPipe, format!("{:?}", status))
+}
