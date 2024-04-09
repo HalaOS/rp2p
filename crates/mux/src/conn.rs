@@ -1,5 +1,7 @@
-use std::io::{self};
+use std::{io, ops::Deref, sync::Arc};
 
+use futures::{AsyncRead, AsyncWrite};
+use rasi::executor::spawn;
 use rasi_ext::{
     future::event_map::{EventMap, EventStatus},
     utils::{AsyncLockable, AsyncSpinMutex},
@@ -15,14 +17,33 @@ enum ConnEvent {
     Accept,
 }
 
+/// Yamux connection type with asynchronous api.
+#[derive(Clone)]
 pub struct Conn {
-    session: AsyncSpinMutex<Session>,
-    event_map: EventMap<ConnEvent>,
+    session: Arc<AsyncSpinMutex<Session>>,
+    event_map: Arc<EventMap<ConnEvent>>,
 }
 
 impl Conn {
-    fn notify_stream_events(&self) -> io::Result<()> {
-        todo!()
+    fn notify_stream_events<S>(&self, session: &S)
+    where
+        S: Deref<Target = Session>,
+    {
+        let mut events = vec![];
+
+        for id in session.readable() {
+            events.push(ConnEvent::StreamRecv(id));
+        }
+
+        for id in session.writable() {
+            events.push(ConnEvent::StreamSend(id));
+        }
+
+        if session.acceptable() {
+            events.push(ConnEvent::Accept);
+        }
+
+        self.event_map.notify_all(&events, EventStatus::Ready);
     }
 
     /// Write new frame to be sent to peer into provided slice.
@@ -32,7 +53,7 @@ impl Conn {
             let mut session = self.session.lock().await;
             match session.send(buf) {
                 Ok(send_size) => {
-                    self.notify_stream_events()?;
+                    self.notify_stream_events(&session);
 
                     return Ok(send_size);
                 }
@@ -84,7 +105,10 @@ impl Conn {
         loop {
             let mut session = self.session.lock().await;
             match session.stream_recv(stream_id, buf) {
-                Ok((send_size, fin)) => return Ok((send_size, fin)),
+                Ok((send_size, fin)) => {
+                    self.event_map.notify(ConnEvent::Send, EventStatus::Ready);
+                    return Ok((send_size, fin));
+                }
                 Err(Error::Done) => {
                     self.event_map
                         .once(ConnEvent::StreamRecv(stream_id), session)
@@ -112,3 +136,59 @@ impl Conn {
         }
     }
 }
+
+impl Conn {
+    pub fn new_with<R, W>(window_size: u32, is_server: bool, reader: R, writer: W) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let session = Session::new(window_size, is_server);
+
+        let conn = Conn {
+            session: Arc::new(AsyncSpinMutex::new(session)),
+            event_map: Default::default(),
+        };
+
+        spawn(Self::recv_loop(conn.clone(), reader));
+        spawn(Self::send_loop(conn.clone(), writer));
+
+        conn
+    }
+
+    async fn recv_loop<R>(conn: Conn, reader: R)
+    where
+        R: AsyncRead + Unpin + Send,
+    {
+        match Self::recv_loop_inner(conn, reader).await {
+            Ok(_) => todo!(),
+            Err(_) => todo!(),
+        }
+    }
+
+    async fn recv_loop_inner<R>(conn: Conn, reader: R) -> io::Result<()>
+    where
+        R: AsyncRead + Unpin + Send,
+    {
+        todo!()
+    }
+
+    async fn send_loop<W>(conn: Conn, writer: W)
+    where
+        W: AsyncWrite + Unpin + Send,
+    {
+        match Self::send_loop_inner(conn, writer).await {
+            Ok(_) => todo!(),
+            Err(_) => todo!(),
+        }
+    }
+    async fn send_loop_inner<W>(conn: Conn, writer: W) -> io::Result<()>
+    where
+        W: AsyncWrite + Unpin + Send,
+    {
+        todo!()
+    }
+}
+
+#[cfg(test)]
+mod tests {}

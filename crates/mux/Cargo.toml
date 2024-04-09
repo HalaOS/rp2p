@@ -11,6 +11,7 @@ readme = "../../README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
 futures = { workspace = true }
+rasi = { workspace = true }
 rasi-ext = { workspace = true, default-features = false }
 bitmask-enum = { workspace = true }
 thiserror = { workspace = true }

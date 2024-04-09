@@ -804,6 +804,11 @@ impl Session {
         Ok(self.incoming_stream_ids.pop_front())
     }
 
+    /// Check if there is an inbound data stream to be read.
+    pub fn acceptable(&self) -> bool {
+        !self.incoming_stream_ids.is_empty()
+    }
+
     /// Returns an iterator over streams that have outstanding data to read.
     pub fn readable(&self) -> impl Iterator<Item = u32> + '_ {
         self.streams
