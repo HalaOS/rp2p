@@ -138,6 +138,24 @@ impl Conn {
 }
 
 impl Conn {
+    /// Create yamux `Conn` instance with provided parameters.
+    pub fn new(window_size: u32, is_server: bool) -> Self {
+        let session = Session::new(window_size, is_server);
+
+        let conn = Conn {
+            session: Arc::new(AsyncSpinMutex::new(session)),
+            event_map: Default::default(),
+        };
+
+        conn
+    }
+
+    /// Create a new yamux `Conn` instance with reliable stream underneath.
+    ///
+    /// This function will start two event loops:
+    ///
+    /// - message send loop, read yamux frame from session and send to peer.
+    /// - message recv loop, recv yamux frame from peer and write to session.
     pub fn new_with<R, W>(window_size: u32, is_server: bool, reader: R, writer: W) -> Self
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -150,7 +168,9 @@ impl Conn {
             event_map: Default::default(),
         };
 
+        // spawn the recv loop
         spawn(Self::recv_loop(conn.clone(), reader));
+        // spawn the send loop
         spawn(Self::send_loop(conn.clone(), writer));
 
         conn
