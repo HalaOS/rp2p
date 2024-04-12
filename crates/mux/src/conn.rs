@@ -181,8 +181,12 @@ impl Conn {
         R: AsyncRead + Unpin + Send,
     {
         match Self::recv_loop_inner(conn, reader).await {
-            Ok(_) => todo!(),
-            Err(_) => todo!(),
+            Ok(_) => {
+                log::info!("Yamux conn stop recv loop");
+            }
+            Err(err) => {
+                log::error!("Yamux conn stop recv loop, {}", err);
+            }
         }
     }
 
@@ -198,8 +202,12 @@ impl Conn {
         W: AsyncWrite + Unpin + Send,
     {
         match Self::send_loop_inner(conn, writer).await {
-            Ok(_) => todo!(),
-            Err(_) => todo!(),
+            Ok(_) => {
+                log::info!("Yamux conn stop send loop");
+            }
+            Err(err) => {
+                log::error!("Yamux conn stop send loop, {}", err);
+            }
         }
     }
     async fn send_loop_inner<W>(conn: Conn, writer: W) -> io::Result<()>
