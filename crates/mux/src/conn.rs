@@ -7,7 +7,7 @@ use rasi_ext::{
     utils::{AsyncLockable, AsyncSpinMutex},
 };
 
-use crate::{map_event_status, Error, Session};
+use crate::{map_event_status, Error, FrameHeader, Session};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 enum ConnEvent {
@@ -190,10 +190,18 @@ impl Conn {
         }
     }
 
-    async fn recv_loop_inner<R>(conn: Conn, reader: R) -> io::Result<()>
+    async fn recv_loop_inner<R>(conn: Conn, mut reader: R) -> io::Result<()>
     where
         R: AsyncRead + Unpin + Send,
     {
+        use rasi::io::AsyncReadExt;
+
+        let mut buf = vec![0; 1024 * 4 + 12];
+
+        loop {
+            reader.read_exact(&mut buf[0..12]).await?;
+        }
+
         todo!()
     }
 
