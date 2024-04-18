@@ -6,7 +6,7 @@ use std::{
 use crate::{ring_buf::RingBuf, Error, Flags, Frame, FrameHeaderBuilder, FrameType, Result};
 
 /// When Yamux is initially starts each stream with a 256KB window size.
-const INIT_WINDOW_SIZE: u32 = 256 * 1024;
+pub const INIT_WINDOW_SIZE: u32 = 256 * 1024;
 
 /// A buffer for stream received data.
 struct RecvBuf {
@@ -78,10 +78,6 @@ impl RecvBuf {
         stream_id: u32,
         flags: Flags,
     ) -> Result<()> {
-        if self.delta_window_size == 0 {
-            return Err(Error::Done);
-        }
-
         if buf.len() < 12 {
             return Err(Error::BufferTooShort(12));
         }
@@ -784,10 +780,8 @@ impl Session {
 
         let stream = Stream::new(stream_id, self.window_size, false);
 
-        if stream.window_size_updatable() {
-            self.send_frames
-                .push_back(SendFrame::WindowUpdate(stream_id));
-        }
+        self.send_frames
+            .push_back(SendFrame::WindowUpdate(stream_id));
 
         self.streams.insert(stream_id, stream);
 
@@ -836,6 +830,12 @@ impl Session {
         } else {
             true
         }
+    }
+
+    pub fn close(&mut self, reason: Reason) -> Result<()> {
+        self.send_frames.push_back(SendFrame::GoAway(reason));
+
+        Ok(())
     }
 }
 

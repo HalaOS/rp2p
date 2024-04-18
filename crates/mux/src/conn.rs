@@ -7,7 +7,7 @@ use rasi_ext::{
     utils::{AsyncLockable, AsyncSpinMutex},
 };
 
-use crate::{map_event_status, Error, Session};
+use crate::{map_event_status, Error, Reason, Session};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 enum ConnEvent {
@@ -19,12 +19,12 @@ enum ConnEvent {
 
 /// Yamux connection type with asynchronous api.
 #[derive(Clone)]
-pub struct Conn {
+pub struct YamuxConn {
     session: Arc<AsyncSpinMutex<Session>>,
     event_map: Arc<EventMap<ConnEvent>>,
 }
 
-impl Conn {
+impl YamuxConn {
     fn notify_stream_events<S>(&self, session: &S)
     where
         S: Deref<Target = Session>,
@@ -51,6 +51,9 @@ impl Conn {
     pub async fn send(&self, buf: &mut [u8]) -> io::Result<usize> {
         loop {
             let mut session = self.session.lock().await;
+
+            log::trace!("send data.");
+
             match session.send(buf) {
                 Ok(send_size) => {
                     self.notify_stream_events(&session);
@@ -58,6 +61,7 @@ impl Conn {
                     return Ok(send_size);
                 }
                 Err(Error::Done) => {
+                    log::trace!("send data. waiting");
                     self.event_map
                         .once(ConnEvent::Send, session)
                         .await
@@ -74,7 +78,10 @@ impl Conn {
     pub async fn recv(&self, buf: &[u8]) -> crate::errors::Result<usize> {
         let mut session = self.session.lock().await;
         match session.recv(buf) {
-            Ok(send_size) => return Ok(send_size),
+            Ok(send_size) => {
+                self.notify_stream_events(&session);
+                return Ok(send_size);
+            }
 
             Err(err) => return Err(err.into()),
         }
@@ -122,7 +129,7 @@ impl Conn {
         }
     }
 
-    pub async fn accept(&self) -> io::Result<u32> {
+    pub async fn stream_accept(&self) -> io::Result<u32> {
         loop {
             let mut session = self.session.lock().await;
             if let Some(stream_id) = session.accept()? {
@@ -135,14 +142,33 @@ impl Conn {
                 .map_err(map_event_status)?;
         }
     }
+
+    pub async fn close(&self, reason: Reason) -> io::Result<()> {
+        let mut session = self.session.lock().await;
+
+        session.close(reason)?;
+
+        Ok(())
+    }
+
+    /// Open new outbound stream.
+    pub async fn stream_open(&self) -> io::Result<u32> {
+        let mut session = self.session.lock().await;
+
+        let stream_id = session.open()?;
+
+        self.event_map.notify(ConnEvent::Send, EventStatus::Ready);
+
+        Ok(stream_id)
+    }
 }
 
-impl Conn {
+impl YamuxConn {
     /// Create yamux `Conn` instance with provided parameters.
     pub fn new(window_size: u32, is_server: bool) -> Self {
         let session = Session::new(window_size, is_server);
 
-        let conn = Conn {
+        let conn = YamuxConn {
             session: Arc::new(AsyncSpinMutex::new(session)),
             event_map: Default::default(),
         };
@@ -163,7 +189,7 @@ impl Conn {
     {
         let session = Session::new(window_size, is_server);
 
-        let conn = Conn {
+        let conn = YamuxConn {
             session: Arc::new(AsyncSpinMutex::new(session)),
             event_map: Default::default(),
         };
@@ -176,7 +202,7 @@ impl Conn {
         conn
     }
 
-    async fn recv_loop<R>(mut conn: Conn, mut reader: R)
+    async fn recv_loop<R>(mut conn: YamuxConn, mut reader: R)
     where
         R: AsyncRead + Unpin + Send,
     {
@@ -188,9 +214,12 @@ impl Conn {
                 log::error!("Yamux conn stop recv loop, {}", err);
             }
         }
+
+        // Close session.
+        _ = conn.close(Reason::Normal).await;
     }
 
-    async fn recv_loop_inner<R>(conn: &mut Conn, reader: &mut R) -> io::Result<()>
+    async fn recv_loop_inner<R>(conn: &mut YamuxConn, reader: &mut R) -> io::Result<()>
     where
         R: AsyncRead + Unpin + Send,
     {
@@ -201,6 +230,8 @@ impl Conn {
         loop {
             reader.read_exact(&mut buf[0..12]).await?;
 
+            log::trace!(target:"RecvLoop", "recv data from peer, len={}",  12);
+
             match conn.recv(&buf[..12]).await {
                 Ok(_) => {
                     continue;
@@ -210,14 +241,20 @@ impl Conn {
                         return Err(Error::Overflow.into());
                     }
 
-                    conn.recv(&mut buf[12..len as usize + 12]).await?;
+                    let len = len as usize + 12;
+
+                    reader.read_exact(&mut buf[12..len]).await?;
+
+                    log::trace!("yamux conn recv loop, recv data, len={}", len);
+
+                    conn.recv(&buf[12..len]).await?;
                 }
                 Err(err) => return Err(err.into()),
             }
         }
     }
 
-    async fn send_loop<W>(mut conn: Conn, mut writer: W)
+    async fn send_loop<W>(mut conn: YamuxConn, mut writer: W)
     where
         W: AsyncWrite + Unpin + Send,
     {
@@ -234,7 +271,7 @@ impl Conn {
 
         _ = writer.close().await;
     }
-    async fn send_loop_inner<W>(conn: &mut Conn, writer: &mut W) -> io::Result<()>
+    async fn send_loop_inner<W>(conn: &mut YamuxConn, writer: &mut W) -> io::Result<()>
     where
         W: AsyncWrite + Unpin + Send,
     {
@@ -243,12 +280,74 @@ impl Conn {
         let mut buf = vec![0; 1024 * 4 + 12];
 
         loop {
-            let send_size = conn.send(&mut buf).await?;
+            let send_size: usize = conn.send(&mut buf).await?;
 
             writer.write_all(&buf[..send_size]).await?;
+
+            log::trace!("yamux send loop, transfer data to peer, len={}", send_size);
         }
     }
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use std::sync::Once;
+
+    use rasi::net::{TcpListener, TcpStream};
+    use rasi_default::{
+        executor::register_futures_executor, net::register_mio_network, time::register_mio_timer,
+    };
+
+    use crate::INIT_WINDOW_SIZE;
+
+    use super::*;
+
+    fn init() {
+        static INIT: Once = Once::new();
+
+        INIT.call_once(|| {
+            register_mio_network();
+            register_mio_timer();
+            register_futures_executor().unwrap();
+
+            pretty_env_logger::init_timed();
+        });
+    }
+
+    #[futures_test::test]
+    async fn test_conn() {
+        init();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+
+        let local_addr = listener.local_addr().unwrap();
+
+        spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+
+            let (read, write) = stream.split();
+
+            let conn = YamuxConn::new_with(INIT_WINDOW_SIZE, true, read, write);
+
+            let stream_id = conn.stream_accept().await.unwrap();
+
+            assert_eq!(stream_id, 1);
+
+            let stream_id = conn.stream_open().await.unwrap();
+
+            assert_eq!(stream_id, 2);
+        });
+
+        let (read, write) = TcpStream::connect(local_addr).await.unwrap().split();
+
+        let conn = YamuxConn::new_with(INIT_WINDOW_SIZE, false, read, write);
+
+        let stream_id = conn.stream_open().await.unwrap();
+
+        assert_eq!(stream_id, 1);
+
+        let stream_id = conn.stream_accept().await.unwrap();
+
+        assert_eq!(stream_id, 2);
+    }
+}

@@ -12,7 +12,12 @@ readme = "../../README.md"
 [dependencies]
 futures = { workspace = true }
 rasi = { workspace = true }
-rasi-ext = { workspace = true, default-features = false }
+rasi-ext = { workspace = true, features = ["event_map"] }
 bitmask-enum = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
+
+[dev-dependencies]
+futures-test = { workspace = true }
+rasi-default = { workspace = true }
+pretty_env_logger = { workspace = true }

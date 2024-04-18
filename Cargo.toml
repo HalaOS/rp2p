@@ -22,7 +22,7 @@ clap = "^4.5"
 futures = { version = "^0.3" }
 bitmask-enum = "^2.2"
 boring = { version = "^4.4.0" }
-quiche = { version = "^0.20.0", features = ["boringssl-boring-crate"] }
+quiche = { version = "^0.21", features = ["boringssl-boring-crate"] }
 bytes = "^1.5"
 rand = { version = "^0.8", features = ["getrandom"] }
 cooked-waker = "^5"
@@ -47,7 +47,6 @@ semver = "^1.0"
 multistream-select = "^0.13"
 yamux = "0.13.1"
 #tls
-rcgen = "^0.12"
 rustls = "0.23.3"
 yasna = "0.5.2"
 x509-parser = "0.16.0"
