@@ -7,7 +7,7 @@ use rasi_ext::{
     utils::{AsyncLockable, AsyncSpinMutex},
 };
 
-use crate::{map_event_status, Error, FrameHeader, Session};
+use crate::{map_event_status, Error, Session};
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 enum ConnEvent {
@@ -71,7 +71,7 @@ impl Conn {
     }
 
     /// Write new data received from peer.
-    pub async fn recv(&self, buf: &[u8]) -> io::Result<usize> {
+    pub async fn recv(&self, buf: &[u8]) -> crate::errors::Result<usize> {
         let mut session = self.session.lock().await;
         match session.recv(buf) {
             Ok(send_size) => return Ok(send_size),
@@ -176,11 +176,11 @@ impl Conn {
         conn
     }
 
-    async fn recv_loop<R>(conn: Conn, reader: R)
+    async fn recv_loop<R>(mut conn: Conn, mut reader: R)
     where
         R: AsyncRead + Unpin + Send,
     {
-        match Self::recv_loop_inner(conn, reader).await {
+        match Self::recv_loop_inner(&mut conn, &mut reader).await {
             Ok(_) => {
                 log::info!("Yamux conn stop recv loop");
             }
@@ -190,7 +190,7 @@ impl Conn {
         }
     }
 
-    async fn recv_loop_inner<R>(conn: Conn, mut reader: R) -> io::Result<()>
+    async fn recv_loop_inner<R>(conn: &mut Conn, reader: &mut R) -> io::Result<()>
     where
         R: AsyncRead + Unpin + Send,
     {
@@ -200,16 +200,28 @@ impl Conn {
 
         loop {
             reader.read_exact(&mut buf[0..12]).await?;
-        }
 
-        todo!()
+            match conn.recv(&buf[..12]).await {
+                Ok(_) => {
+                    continue;
+                }
+                Err(Error::BufferTooShort(len)) => {
+                    if len + 12 > buf.len() as u32 {
+                        return Err(Error::Overflow.into());
+                    }
+
+                    conn.recv(&mut buf[12..len as usize + 12]).await?;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
     }
 
-    async fn send_loop<W>(conn: Conn, writer: W)
+    async fn send_loop<W>(mut conn: Conn, mut writer: W)
     where
         W: AsyncWrite + Unpin + Send,
     {
-        match Self::send_loop_inner(conn, writer).await {
+        match Self::send_loop_inner(&mut conn, &mut writer).await {
             Ok(_) => {
                 log::info!("Yamux conn stop send loop");
             }
@@ -217,12 +229,24 @@ impl Conn {
                 log::error!("Yamux conn stop send loop, {}", err);
             }
         }
+
+        use rasi::io::AsyncWriteExt;
+
+        _ = writer.close().await;
     }
-    async fn send_loop_inner<W>(conn: Conn, writer: W) -> io::Result<()>
+    async fn send_loop_inner<W>(conn: &mut Conn, writer: &mut W) -> io::Result<()>
     where
         W: AsyncWrite + Unpin + Send,
     {
-        todo!()
+        use rasi::io::AsyncWriteExt;
+
+        let mut buf = vec![0; 1024 * 4 + 12];
+
+        loop {
+            let send_size = conn.send(&mut buf).await?;
+
+            writer.write_all(&buf[..send_size]).await?;
+        }
     }
 }
 

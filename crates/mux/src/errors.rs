@@ -36,6 +36,10 @@ pub enum Error {
     #[error("The provided buffer is too short. expected {0}")]
     BufferTooShort(u32),
 
+    /// The length of the frame received was too long to handle.
+    #[error("The length of the frame received was too long to handle.")]
+    Overflow,
+
     /// The provided frame cannot be parsed because its version is unknown.
     ///
     /// The frame version is provided as associated data.

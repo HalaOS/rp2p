@@ -62,6 +62,20 @@ impl<'a> From<&'a [u8; 12]> for FrameHeader<'a> {
     }
 }
 
+impl<'a> TryFrom<&'a [u8]> for FrameHeader<'a> {
+    type Error = Error;
+
+    fn try_from(value: &'a [u8]) -> std::prelude::v1::Result<Self, Self::Error> {
+        if value.len() < 12 {
+            return Err(Error::BufferTooShort(12));
+        }
+
+        let buf: &[u8; 12] = (&value[..12]).try_into().unwrap();
+
+        Ok(FrameHeader::from(buf))
+    }
+}
+
 impl<'a> FrameHeader<'a> {
     /// use [`FrameBuilder`] to create new `Frame` instance step by step.
 
