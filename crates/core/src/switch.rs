@@ -127,7 +127,13 @@ impl P2pConn {
     {
         let mut stream = self.conn.accept().await?;
 
-        let (protocol_id, _) = listener_select_proto(&mut stream, protos).await?;
+        log::trace!("Accept stream listener_select_proto");
+
+        let (protocol_id, b) = listener_select_proto(&mut stream, protos).await?;
+
+        log::trace!("Accept stream listener_select_proto -- success");
+
+        drop(b);
 
         let protocol_id = protocol_id.as_ref().to_owned().try_into()?;
 
