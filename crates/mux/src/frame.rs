@@ -259,10 +259,6 @@ impl<'a> Frame<'a> {
                 return Err(Error::BufferTooShort(frame_len as u32));
             }
 
-            if frame_len == 12 {
-                return Err(Error::InvalidFrame(InvalidFrameKind::Body));
-            }
-
             (Some(Cow::Borrowed(&buf[12..frame_len])), frame_len)
         } else {
             (None, 12)

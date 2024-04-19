@@ -75,6 +75,10 @@ async fn sniffier() -> io::Result<()> {
         .create()
         .await?;
 
+    let peer_id = switch.public_key().await?.to_peer_id();
+
+    log::info!("Start sniffer with host peer_id={}", peer_id);
+
     for raddr in config.bootstrap {
         log::info!("connect to peer: {}", raddr);
         switch.connect(&[raddr.clone()]).await?;

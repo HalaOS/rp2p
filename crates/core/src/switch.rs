@@ -669,6 +669,8 @@ mod core_protocols {
 
             let mut buf = ReadBuf::with_capacity(switch.max_identity_packet_len());
 
+            log::trace!("identity_request: read content");
+
             loop {
                 let read_size = stream.read(buf.chunk_mut()).await?;
 
@@ -681,7 +683,9 @@ mod core_protocols {
                 buf.advance_mut(read_size);
             }
 
-            Identify::parse_from_bytes(buf.chunk())?
+            log::trace!("identity_request total size: {:?}", buf.remaining());
+
+            Identify::parse_from_bytes(&buf.chunk()[2..])?
         };
 
         let conn_peer_id = conn.peer_id()?;
@@ -689,6 +693,12 @@ mod core_protocols {
         let pubkey = PublicKey::try_decode_protobuf(identify.publicKey())?;
 
         let peer_id = pubkey.to_peer_id();
+
+        log::trace!(
+            "conn_peer_id={}, identity_response_peer_id={}",
+            conn_peer_id,
+            peer_id
+        );
 
         if conn_peer_id != peer_id {
             return Err(Error::UnexpectPeerId);

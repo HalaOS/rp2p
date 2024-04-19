@@ -177,7 +177,7 @@ impl Transport for TcpTransport {
 
         let cert = stream
             .ssl()
-            .certificate()
+            .peer_certificate()
             .ok_or(io::Error::new(io::ErrorKind::Other, "Handshaking"))?;
 
         let public_key = rp2p_x509::verify(cert.to_der()?)?;
@@ -221,7 +221,7 @@ impl Listener for P2pTcpListener {
 
         let cert = stream
             .ssl()
-            .certificate()
+            .peer_certificate()
             .ok_or(io::Error::new(io::ErrorKind::Other, "Handshaking"))?;
 
         let public_key = rp2p_x509::verify(cert.to_der()?)?;

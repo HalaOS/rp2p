@@ -31,3 +31,5 @@ message Identify {
   // github.com/libp2p/go-libp2p/core/peer/pb/peer_record.proto for message definitions.
   optional bytes signedPeerRecord = 8;
 }
+
+

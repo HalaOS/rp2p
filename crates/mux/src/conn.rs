@@ -120,13 +120,21 @@ impl YamuxConn {
 
     pub async fn stream_recv(&self, stream_id: u32, buf: &mut [u8]) -> io::Result<(usize, bool)> {
         loop {
+            log::trace!("stream, id={}, recv", stream_id);
             let mut session = self.session.lock().await;
             match session.stream_recv(stream_id, buf) {
                 Ok((send_size, fin)) => {
+                    log::trace!(
+                        "stream, id={}, recv_size={}, fin={}",
+                        stream_id,
+                        send_size,
+                        fin
+                    );
                     self.event_map.notify(ConnEvent::Send, EventStatus::Ready);
                     return Ok((send_size, fin));
                 }
                 Err(Error::Done) => {
+                    log::trace!("stream, id={}, recv pending.", stream_id,);
                     self.event_map
                         .once(ConnEvent::StreamRecv(stream_id), session)
                         .await
@@ -270,11 +278,9 @@ impl YamuxConn {
                     continue;
                 }
                 Err(Error::BufferTooShort(len)) => {
-                    if len + 12 > buf.len() as u32 {
+                    if len > buf.len() as u32 {
                         return Err(Error::Overflow.into());
                     }
-
-                    log::trace!("yamux conn recv loop, recv body, len={}", len);
 
                     reader.read_exact(&mut buf[12..len as usize]).await?;
 
@@ -394,7 +400,10 @@ impl AsyncRead for YamuxStream {
         Box::pin(self.raw.1.stream_recv(self.raw.0, buf))
             .poll_unpin(cx)
             .map(|r| match r {
-                Ok((readsize, _)) => Ok(readsize),
+                Ok((readsize, fin)) => {
+                    log::trace!("yamux AsyncRead: len={}, fin={}", readsize, fin);
+                    return Ok(readsize);
+                }
                 Err(err) => {
                     if err.kind() == io::ErrorKind::BrokenPipe {
                         Ok(0)
@@ -428,7 +437,7 @@ mod tests {
             register_mio_timer();
             register_futures_executor().unwrap();
 
-            pretty_env_logger::init_timed();
+            // pretty_env_logger::init_timed();
         });
     }
 

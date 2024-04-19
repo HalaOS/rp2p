@@ -322,6 +322,8 @@ impl Stream {
             }
 
             self.flags |= Flags::FIN;
+
+            log::trace!("stream, id={} recv FIN", self.stream_id);
         }
 
         if flags.contains(Flags::RST) {
@@ -343,7 +345,7 @@ impl Stream {
 
     /// Test if the stream has data that can be read.
     fn readable(&self) -> bool {
-        self.recv_buf.remaining() > 0
+        self.recv_buf.remaining() > 0 || self.flags.contains(Flags::FIN)
     }
 
     /// Writes new data into send buffer.
@@ -363,7 +365,7 @@ impl Stream {
         }
 
         if fin {
-            if self.flags.contains(Flags::FIN) {
+            if self.flags.contains(Flags::FIN) && buf.len() > 0 {
                 log::error!("Set fin flag twice, stream_id={}", self.stream_id);
                 return Err(Error::FinalSize(self.stream_id));
             }
@@ -381,7 +383,17 @@ impl Stream {
     ///
     /// On success the amount of bytes read is returned, or [`Error::Done`] if there is no data to read.
     fn recv(&mut self, buf: &mut [u8]) -> Result<usize> {
-        self.recv_buf.recv(buf)
+        match self.recv_buf.recv(buf) {
+            Ok(read_size) => Ok(read_size),
+            Err(Error::Done) => {
+                if self.flags.contains(Flags::FIN) {
+                    Ok(0)
+                } else {
+                    Err(Error::Done)
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Returns true if all the data has been read from the specified stream.
@@ -465,6 +477,12 @@ impl Session {
 
         let frame_type = frame.header.frame_type()?;
 
+        log::trace!(
+            "recv frame, type={:?}, len={}",
+            frame_type,
+            frame.header.length()
+        );
+
         match frame_type {
             FrameType::Data => self.recv_data_frame(&frame)?,
             FrameType::WindowUpdate => self.recv_window_update_frame(&frame)?,
@@ -515,7 +533,7 @@ impl Session {
         let flags = frame.header.flags()?;
 
         if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.recv_data_frame(frame)?;
+            stream.recv_window_update_frame(frame)?;
         } else {
             if flags.contains(Flags::SYN) {
                 let mut stream = Stream::new(stream_id, self.window_size, true);
@@ -677,7 +695,11 @@ impl Session {
 
         match self.recv_inner(buf) {
             Ok(read_size) => Ok(read_size),
+            Err(Error::BufferTooShort(len)) => {
+                return Err(Error::BufferTooShort(len));
+            }
             Err(err) => {
+                log::error!("handle recv error: {}", err);
                 // self.terminated = Some(Reason::ProtocolError);
                 self.send_frames
                     .push_back(SendFrame::GoAway(Reason::ProtocolError));
