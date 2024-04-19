@@ -608,7 +608,7 @@ impl Session {
     }
 
     fn send_pong(&mut self, buf: &mut [u8], opaque: u32) -> Result<usize> {
-        let buf: &mut [u8; 12] = buf.try_into().unwrap();
+        let buf: &mut [u8; 12] = (&mut buf[..12]).try_into().unwrap();
 
         FrameHeaderBuilder::with(buf)
             .stream_id(0)
