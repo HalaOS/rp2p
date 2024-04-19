@@ -12,8 +12,10 @@ readme = "../../README.md"
 [dependencies]
 rp2p-core = { workspace = true }
 rp2p-x509 = { workspace = true }
+rp2p-mux = { workspace = true }
 async-trait = { workspace = true }
-yamux = { workspace = true }
+
+
 #rasi
 rasi = { workspace = true }
 rasi-ext = { workspace = true, default-features = false, features = ["tls"] }

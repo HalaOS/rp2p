@@ -74,6 +74,7 @@ protobuf = "3.4.0"
 rp2p-core = { path = "./crates/core", version = "^0.1" }
 rp2p-x509 = { path = "./crates/x509", version = "^0.1" }
 rp2p-tcp = { path = "./crates/tcp", version = "^0.1" }
+rp2p-mux = { path = "./crates/mux", version = "^0.1" }
 rp2p-conn-pool = { path = "./crates/conn_pool", version = "^0.1" }
 rp2p-route-table = { path = "./crates/route_table", version = "^0.1" }
 rp2p-hostkey = { path = "./crates/hostkey", version = "^0.1" }
