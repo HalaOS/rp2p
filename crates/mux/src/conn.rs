@@ -1,6 +1,6 @@
-use std::{io, ops::Deref, sync::Arc};
+use std::{io, ops::Deref, sync::Arc, task::Poll};
 
-use futures::{AsyncRead, AsyncWrite};
+use futures::{AsyncRead, AsyncWrite, FutureExt};
 use rasi::executor::spawn;
 use rasi_ext::{
     future::event_map::{EventMap, EventStatus},
@@ -22,6 +22,7 @@ enum ConnEvent {
 pub struct YamuxConn {
     session: Arc<AsyncSpinMutex<Session>>,
     event_map: Arc<EventMap<ConnEvent>>,
+    is_server: bool,
 }
 
 impl YamuxConn {
@@ -87,6 +88,15 @@ impl YamuxConn {
         }
     }
 
+    /// Close `YamuxConn` with provided [`reason`](Reason)
+    pub async fn close(&self, reason: Reason) -> io::Result<()> {
+        let mut session = self.session.lock().await;
+
+        session.close(reason)?;
+
+        Ok(())
+    }
+
     pub async fn stream_send(&self, stream_id: u32, buf: &[u8], fin: bool) -> io::Result<usize> {
         loop {
             let mut session = self.session.lock().await;
@@ -129,11 +139,11 @@ impl YamuxConn {
         }
     }
 
-    pub async fn stream_accept(&self) -> io::Result<u32> {
+    pub async fn stream_accept(&self) -> io::Result<YamuxStream> {
         loop {
             let mut session = self.session.lock().await;
             if let Some(stream_id) = session.accept()? {
-                return Ok(stream_id);
+                return Ok(YamuxStream::new(stream_id, self.clone()));
             }
 
             self.event_map
@@ -143,23 +153,40 @@ impl YamuxConn {
         }
     }
 
-    pub async fn close(&self, reason: Reason) -> io::Result<()> {
-        let mut session = self.session.lock().await;
-
-        session.close(reason)?;
-
-        Ok(())
-    }
-
     /// Open new outbound stream.
-    pub async fn stream_open(&self) -> io::Result<u32> {
+    pub async fn stream_open(&self) -> io::Result<YamuxStream> {
         let mut session = self.session.lock().await;
 
         let stream_id = session.open()?;
 
         self.event_map.notify(ConnEvent::Send, EventStatus::Ready);
 
-        Ok(stream_id)
+        Ok(YamuxStream::new(stream_id, self.clone()))
+    }
+
+    /// Returns true if all the data has been read from the specified stream.
+    ///
+    /// This instructs the application that all the data received from the peer on the stream has been read, and there won’t be anymore in the future.
+    ///
+    /// Basically this returns true when the peer either set the fin flag for the stream, or sent *_FRAME with RST flag.
+    pub async fn stream_finished(&self, stream_id: u32) -> bool {
+        let session = self.session.lock().await;
+
+        session.stream_finished(stream_id)
+    }
+
+    /// Elegantly close stream.
+    pub async fn stream_close(&self, stream_id: u32) -> io::Result<()> {
+        self.stream_send(stream_id, b"", true).await?;
+
+        // stream object dropped, reset the stream immediately
+        if !self.stream_finished(stream_id).await {
+            let mut session = self.session.lock().await;
+
+            session.stream_reset(stream_id)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -171,6 +198,7 @@ impl YamuxConn {
         let conn = YamuxConn {
             session: Arc::new(AsyncSpinMutex::new(session)),
             event_map: Default::default(),
+            is_server,
         };
 
         conn
@@ -192,6 +220,7 @@ impl YamuxConn {
         let conn = YamuxConn {
             session: Arc::new(AsyncSpinMutex::new(session)),
             event_map: Default::default(),
+            is_server,
         };
 
         // spawn the recv loop
@@ -230,7 +259,11 @@ impl YamuxConn {
         loop {
             reader.read_exact(&mut buf[0..12]).await?;
 
-            log::trace!(target:"RecvLoop", "recv data from peer, len={}",  12);
+            log::trace!(
+                "recv data from peer, is_server={}, len={}",
+                conn.is_server,
+                12
+            );
 
             match conn.recv(&buf[..12]).await {
                 Ok(_) => {
@@ -241,13 +274,13 @@ impl YamuxConn {
                         return Err(Error::Overflow.into());
                     }
 
-                    let len = len as usize + 12;
+                    log::trace!("yamux conn recv loop, recv body, len={}", len);
 
-                    reader.read_exact(&mut buf[12..len]).await?;
+                    reader.read_exact(&mut buf[12..len as usize]).await?;
 
                     log::trace!("yamux conn recv loop, recv data, len={}", len);
 
-                    conn.recv(&buf[12..len]).await?;
+                    conn.recv(&buf[..len as usize]).await?;
                 }
                 Err(err) => return Err(err.into()),
             }
@@ -284,8 +317,92 @@ impl YamuxConn {
 
             writer.write_all(&buf[..send_size]).await?;
 
-            log::trace!("yamux send loop, transfer data to peer, len={}", send_size);
+            buf[..12].fill(0x0);
+
+            log::trace!(
+                "yamux send loop, transfer data to peer, is_server={}, len={}",
+                conn.is_server,
+                send_size
+            );
         }
+    }
+}
+
+/// Stream object with [`Drop`] trait.
+struct RawStream(u32, YamuxConn);
+
+impl Drop for RawStream {
+    fn drop(&mut self) {
+        let stream_id = self.0;
+        let conn = self.1.clone();
+        spawn(async move {
+            if let Err(err) = conn.stream_close(stream_id).await {
+                log::error!("Close stream with error: {}", err);
+            }
+        })
+    }
+}
+
+/// Yamux stream type with asynchronous api.
+pub struct YamuxStream {
+    raw: Arc<RawStream>,
+}
+
+impl YamuxStream {
+    fn new(stream_id: u32, conn: YamuxConn) -> Self {
+        Self {
+            raw: Arc::new(RawStream(stream_id, conn)),
+        }
+    }
+
+    /// Returns stream id.
+    pub fn stream_id(&self) -> u32 {
+        self.raw.0
+    }
+}
+
+impl AsyncWrite for YamuxStream {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        Box::pin(self.raw.1.stream_send(self.raw.0, buf, false)).poll_unpin(cx)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        Box::pin(self.raw.1.stream_close(self.raw.0)).poll_unpin(cx)
+    }
+}
+
+impl AsyncRead for YamuxStream {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> Poll<io::Result<usize>> {
+        Box::pin(self.raw.1.stream_recv(self.raw.0, buf))
+            .poll_unpin(cx)
+            .map(|r| match r {
+                Ok((readsize, _)) => Ok(readsize),
+                Err(err) => {
+                    if err.kind() == io::ErrorKind::BrokenPipe {
+                        Ok(0)
+                    } else {
+                        Err(err)
+                    }
+                }
+            })
     }
 }
 
@@ -293,6 +410,7 @@ impl YamuxConn {
 mod tests {
     use std::sync::Once;
 
+    use futures::{AsyncReadExt, AsyncWriteExt};
     use rasi::net::{TcpListener, TcpStream};
     use rasi_default::{
         executor::register_futures_executor, net::register_mio_network, time::register_mio_timer,
@@ -329,25 +447,33 @@ mod tests {
 
             let conn = YamuxConn::new_with(INIT_WINDOW_SIZE, true, read, write);
 
-            let stream_id = conn.stream_accept().await.unwrap();
+            let stream = conn.stream_accept().await.unwrap();
 
-            assert_eq!(stream_id, 1);
+            assert_eq!(stream.stream_id(), 1);
 
-            let stream_id = conn.stream_open().await.unwrap();
+            let mut stream = conn.stream_open().await.unwrap();
 
-            assert_eq!(stream_id, 2);
+            assert_eq!(stream.stream_id(), 2);
+
+            stream.write_all(b"hello world").await.unwrap();
         });
 
         let (read, write) = TcpStream::connect(local_addr).await.unwrap().split();
 
         let conn = YamuxConn::new_with(INIT_WINDOW_SIZE, false, read, write);
 
-        let stream_id = conn.stream_open().await.unwrap();
+        let stream = conn.stream_open().await.unwrap();
 
-        assert_eq!(stream_id, 1);
+        assert_eq!(stream.stream_id(), 1);
 
-        let stream_id = conn.stream_accept().await.unwrap();
+        let mut stream = conn.stream_accept().await.unwrap();
 
-        assert_eq!(stream_id, 2);
+        assert_eq!(stream.stream_id(), 2);
+
+        let mut buf = vec![0; 100];
+
+        let read_size = stream.read(&mut buf).await.unwrap();
+
+        assert_eq!(&buf[..read_size], b"hello world");
     }
 }

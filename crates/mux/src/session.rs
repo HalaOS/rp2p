@@ -223,8 +223,7 @@ impl Stream {
     /// Returns [`Error::Done`] if delta_window_size is zero.
     /// you should first call [`Self::window_size_updatable`] before calling
     /// this function to check if you need to send a `WINDOW_UPDATE_FRAME`.
-    fn send_window_size_update_frame(&mut self, buf: &mut [u8]) -> Result<()> {
-        let mut flags = Flags::none();
+    fn send_window_size_update_frame(&mut self, buf: &mut [u8], mut flags: Flags) -> Result<()> {
         self.send_flags_adjustment(&mut flags)?;
 
         self.recv_buf
@@ -263,6 +262,15 @@ impl Stream {
         if !self.flags.contains(Flags::ACK) && self.is_server {
             *flags |= Flags::ACK;
             self.flags |= Flags::ACK;
+        }
+
+        // update RST flag.
+        if flags.contains(Flags::RST) {
+            if self.flags.contains(Flags::RST) {
+                *flags ^= Flags::RST;
+            } else {
+                self.flags |= Flags::RST;
+            }
         }
 
         Ok(())
@@ -398,7 +406,7 @@ enum SendFrame {
     #[allow(unused)]
     Ping(u32),
     Pong(u32),
-    WindowUpdate(u32),
+    WindowUpdate(u32, Flags),
     Data(u32),
     GoAway(Reason),
 }
@@ -482,7 +490,7 @@ impl Session {
 
                 if stream.window_size_updatable() {
                     self.send_frames
-                        .push_back(SendFrame::WindowUpdate(stream_id));
+                        .push_back(SendFrame::WindowUpdate(stream_id, Flags::none()));
 
                     stream.stream_state_adjustment(Flags::ACK)?;
                 }
@@ -515,7 +523,7 @@ impl Session {
 
                 if stream.window_size_updatable() {
                     self.send_frames
-                        .push_back(SendFrame::WindowUpdate(stream_id));
+                        .push_back(SendFrame::WindowUpdate(stream_id, Flags::none()));
 
                     stream.stream_state_adjustment(Flags::ACK)?;
                 }
@@ -612,9 +620,9 @@ impl Session {
         Ok(12)
     }
 
-    fn send_window_size(&mut self, buf: &mut [u8], stream_id: u32) -> Result<usize> {
+    fn send_window_size(&mut self, buf: &mut [u8], stream_id: u32, flags: Flags) -> Result<usize> {
         if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.send_window_size_update_frame(buf)?;
+            stream.send_window_size_update_frame(buf, flags)?;
             Ok(12)
         } else {
             Err(Error::Done)
@@ -634,7 +642,7 @@ impl Session {
     fn send_go_away(&mut self, buf: &mut [u8], reason: Reason) -> Result<usize> {
         self.terminated = Some(reason);
 
-        let buf: &mut [u8; 12] = buf.try_into().unwrap();
+        let buf: &mut [u8; 12] = (&mut buf[..12]).try_into().unwrap();
 
         let reason_u8: u8 = reason.into();
 
@@ -691,10 +699,12 @@ impl Session {
             match send_frame {
                 SendFrame::Ping(opaque) => return self.send_ping(buf, opaque),
                 SendFrame::Pong(opaque) => return self.send_pong(buf, opaque),
-                SendFrame::WindowUpdate(stream_id) => match self.send_window_size(buf, stream_id) {
-                    Err(Error::Done) => continue,
-                    r => return r,
-                },
+                SendFrame::WindowUpdate(stream_id, flags) => {
+                    match self.send_window_size(buf, stream_id, flags) {
+                        Err(Error::Done) => continue,
+                        r => return r,
+                    }
+                }
                 SendFrame::Data(stream_id) => match self.send_data(buf, stream_id) {
                     Err(Error::Done) => continue,
                     r => return r,
@@ -750,7 +760,7 @@ impl Session {
 
             if stream.window_size_updatable() {
                 self.send_frames
-                    .push_back(SendFrame::WindowUpdate(stream_id));
+                    .push_back(SendFrame::WindowUpdate(stream_id, Flags::none()));
             }
 
             Ok((read_size, stream.is_finished()))
@@ -781,7 +791,7 @@ impl Session {
         let stream = Stream::new(stream_id, self.window_size, false);
 
         self.send_frames
-            .push_back(SendFrame::WindowUpdate(stream_id));
+            .push_back(SendFrame::WindowUpdate(stream_id, Flags::none()));
 
         self.streams.insert(stream_id, stream);
 
@@ -829,6 +839,18 @@ impl Session {
             stream.is_finished()
         } else {
             true
+        }
+    }
+
+    /// Reset a stream immediately. May be sent with a data or window update message.
+    pub fn stream_reset(&mut self, stream_id: u32) -> Result<()> {
+        if let Some(_) = self.streams.get(&stream_id) {
+            self.send_frames
+                .push_back(SendFrame::WindowUpdate(stream_id, Flags::RST));
+
+            Ok(())
+        } else {
+            Err(Error::InvalidStreamState(stream_id))
         }
     }
 
@@ -949,7 +971,9 @@ mod tests {
 
         let mut buf = vec![0; 12];
 
-        stream.send_window_size_update_frame(&mut buf).unwrap();
+        stream
+            .send_window_size_update_frame(&mut buf, Flags::none())
+            .unwrap();
 
         assert!(!stream.window_size_updatable());
 
@@ -959,10 +983,9 @@ mod tests {
 
         assert!(flags.contains(Flags::SYN));
 
-        assert_eq!(
-            stream.send_window_size_update_frame(&mut buf).unwrap_err(),
-            Error::Done
-        );
+        stream
+            .send_window_size_update_frame(&mut buf, Flags::none())
+            .unwrap();
 
         assert!(stream.writable());
 
