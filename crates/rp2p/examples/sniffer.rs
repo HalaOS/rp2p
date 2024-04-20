@@ -1,9 +1,9 @@
 //! This is an example program to sniff the topology of a libp2p network
 
-use std::io;
+use std::{io, time::Duration};
 
 use clap::Parser;
-use rasi::executor::block_on;
+use rasi::{executor::block_on, time::sleep};
 use rasi_default::{
     executor::register_futures_executor, net::register_mio_network, time::register_mio_timer,
 };
@@ -86,5 +86,7 @@ async fn sniffier() -> io::Result<()> {
         log::info!("connect to peer: {} -- ok", raddr);
     }
 
-    Ok(())
+    loop {
+        sleep(Duration::from_secs(1)).await;
+    }
 }

@@ -42,6 +42,10 @@ pub enum Flags {
     ACK,
     FIN,
     RST,
+    /// inner flag.
+    RFIN,
+    /// inner flag.
+    RRST,
 }
 
 /// Yamux uses a streaming connection underneath, but imposes a message framing so that it can be shared between many logical streams. Each frame contains a header like:

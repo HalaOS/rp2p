@@ -279,7 +279,7 @@ impl Stream {
     /// Receive a window update frame from peer.
     fn recv_window_update_frame<'a>(&mut self, frame: &Frame<'a>) -> Result<()> {
         let flags = frame.header.flags()?;
-        self.stream_state_adjustment(flags)?;
+        self.peer_state_adjustment(flags)?;
 
         self.send_buf.update_window_size(frame.header.length());
 
@@ -297,7 +297,7 @@ impl Stream {
         if let Some(body) = &frame.body {
             self.recv_buf.write(body)?;
 
-            self.stream_state_adjustment(flags)?;
+            self.peer_state_adjustment(flags)?;
         } else {
             return Err(Error::InvalidFrame(crate::InvalidFrameKind::Body));
         }
@@ -305,7 +305,7 @@ impl Stream {
         Ok(())
     }
 
-    fn stream_state_adjustment(&mut self, flags: Flags) -> Result<()> {
+    fn peer_state_adjustment(&mut self, flags: Flags) -> Result<()> {
         if flags.contains(Flags::ACK) {
             if self.flags.contains(Flags::ACK) {
                 log::error!("ACK same stream twice, stream_id={}", self.stream_id);
@@ -316,23 +316,23 @@ impl Stream {
         }
 
         if flags.contains(Flags::FIN) {
-            if self.flags.contains(Flags::FIN) {
+            if self.flags.contains(Flags::RFIN) {
                 log::error!("FIN same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
 
-            self.flags |= Flags::FIN;
+            self.flags |= Flags::RFIN;
 
             log::trace!("stream, id={} recv FIN", self.stream_id);
         }
 
         if flags.contains(Flags::RST) {
-            if self.flags.contains(Flags::RST) {
+            if self.flags.contains(Flags::RRST) {
                 log::error!("RST same stream twice, stream_id={}", self.stream_id);
                 return Err(Error::InvalidStreamState(self.stream_id));
             }
 
-            self.flags |= Flags::RST;
+            self.flags |= Flags::RRST;
         }
 
         Ok(())
@@ -406,7 +406,7 @@ impl Stream {
             return false;
         }
 
-        if self.flags.contains(Flags::FIN) || self.flags.contains(Flags::RST) {
+        if self.flags.contains(Flags::RFIN) || self.flags.contains(Flags::RRST) {
             return true;
         }
 
@@ -510,7 +510,7 @@ impl Session {
                     self.send_frames
                         .push_back(SendFrame::WindowUpdate(stream_id, Flags::none()));
 
-                    stream.stream_state_adjustment(Flags::ACK)?;
+                    stream.peer_state_adjustment(Flags::ACK)?;
                 }
 
                 self.streams.insert(stream_id, stream);
@@ -543,7 +543,7 @@ impl Session {
                     self.send_frames
                         .push_back(SendFrame::WindowUpdate(stream_id, Flags::none()));
 
-                    stream.stream_state_adjustment(Flags::ACK)?;
+                    stream.peer_state_adjustment(Flags::ACK)?;
                 }
 
                 self.streams.insert(stream_id, stream);

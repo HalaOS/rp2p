@@ -518,6 +518,8 @@ impl Switch {
     async fn handle_core_protocols(&mut self, stream: &mut P2pStream) -> Result<bool> {
         let protocol_id = stream.protocol_id();
 
+        log::trace!("handle core protocols: {}", protocol_id.to_string());
+
         if protocol_id.to_string() == "/ipfs/id/1.0.0" {
             core_protocols::identity_response(self, stream).await?;
 
@@ -696,11 +698,27 @@ mod core_protocols {
     /// Handle `/ipfs/ping/1.0.0` request.
     pub(super) async fn ping_echo(mut stream: &mut P2pStream) -> Result<()> {
         loop {
+            let body_len = unsigned_varint::aio::read_usize(&mut stream).await?;
+
+            log::trace!("recv /ipfs/ping/1.0.0 payload len {}", body_len);
+
+            if body_len != 32 {
+                return Err(Error::ProtocolPing);
+            }
+
             let mut buf = vec![0; 32];
 
             stream.read_exact(&mut buf).await?;
 
+            let mut payload_len = unsigned_varint::encode::usize_buffer();
+
+            stream
+                .write_all(unsigned_varint::encode::usize(buf.len(), &mut payload_len))
+                .await?;
+
             stream.write_all(&buf).await?;
+
+            log::trace!("send /ipfs/ping/1.0.0 echo ");
         }
     }
 

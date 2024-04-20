@@ -35,6 +35,9 @@ pub enum Error {
 
     #[error("Receiving buffer overflow, {0}")]
     BufferOverflow(BufferOverflow),
+
+    #[error("Parse protocol ping with error.")]
+    ProtocolPing,
 }
 
 #[derive(Debug, thiserror::Error)]

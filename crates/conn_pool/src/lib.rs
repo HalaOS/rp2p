@@ -90,20 +90,50 @@ async fn ping_loop(mut conn: P2pConn, ping_interval: Duration) {
 async fn ping_once(conn: &mut P2pConn, ping_interval: Duration) -> io::Result<()> {
     let mut stream = conn.open(["/ipfs/ping/1.0.0"]).await?;
 
-    let buf: [u8; 32] = thread_rng().gen();
+    let buf: [u8; 31] = thread_rng().gen();
+
+    let mut payload_len = unsigned_varint::encode::usize_buffer();
+
+    stream
+        .write_all(unsigned_varint::encode::usize(32, &mut payload_len))
+        .await?;
 
     stream.write_all(&buf).await?;
 
-    let mut resp = vec![0; 32];
+    let echo = async move {
+        let body_len = unsigned_varint::aio::read_usize(&mut stream)
+            .await
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
-    stream
-        .read_exact(&mut resp)
-        .timeout(ping_interval)
-        .await
-        .ok_or(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "read ping echo timeout",
-        ))??;
+        log::trace!("recv /ipfs/ping/1.0.0 payload len {}", body_len);
+
+        if body_len != 32 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Recieved invalid ping echo",
+            ));
+        }
+
+        let mut resp = vec![0; 31];
+
+        stream.read_exact(&mut resp).await?;
+
+        if resp != buf {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Recieved invalid ping echo",
+            ));
+        }
+
+        log::trace!("recv /ipfs/ping/1.0.0 echo matched");
+
+        Ok(())
+    };
+
+    echo.timeout(ping_interval).await.ok_or(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "read ping echo timeout",
+    ))??;
 
     Ok(())
 }
