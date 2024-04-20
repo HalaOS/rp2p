@@ -3,18 +3,20 @@ use std::{
     fmt::Debug,
     hash::Hash,
     ops::{Deref, DerefMut},
+    pin::Pin,
     sync::Arc,
+    time::Duration,
 };
 
-use futures::{AsyncReadExt, AsyncWriteExt, Stream, StreamExt};
+use futures::{AsyncRead, AsyncReadExt, AsyncWriteExt, Stream, StreamExt};
 use identity::{PeerId, PublicKey};
 use multiaddr::Multiaddr;
 use multistream_select::{dialer_select_proto, listener_select_proto, Version};
 use protobuf::Message;
-use rasi::executor::spawn;
+use rasi::{executor::spawn, time::TimeoutExt};
 use rasi_ext::{
     future::event_map::{EventMap, EventStatus},
-    utils::{AsyncLockable, AsyncSpinMutex, ReadBuf},
+    utils::{AsyncLockable, AsyncSpinMutex},
 };
 
 use crate::{
@@ -56,6 +58,16 @@ impl Deref for P2pStream {
 impl DerefMut for P2pStream {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.stream
+    }
+}
+
+impl AsyncRead for &mut P2pStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_read(cx, buf)
     }
 }
 
@@ -203,6 +215,8 @@ struct ImmutableSwitch {
     conn_pool: BoxConnPool,
     /// Registered transports.
     transports: Vec<BoxTransport>,
+    /// Protocol rpc timeout.
+    rpc_timeout: Duration,
 }
 
 impl ImmutableSwitch {
@@ -462,17 +476,32 @@ impl Switch {
 
             let event_map = self.event_map.clone();
 
+            let rpc_timeout = self.immutable_switch.rpc_timeout;
+
             spawn(async move {
-                match this.handle_core_protocols(&mut stream).await {
-                    Ok(true) => {
+                match this
+                    .handle_core_protocols(&mut stream)
+                    .timeout(rpc_timeout)
+                    .await
+                {
+                    Some(Ok(true)) => {
                         return;
                     }
-                    Ok(false) => {}
-                    Err(err) => {
+                    Some(Ok(false)) => {}
+                    Some(Err(err)) => {
                         log::error!(
                             "handle core protocol {}, returns error: {}",
                             stream.protocol_id(),
                             err
+                        );
+
+                        return;
+                    }
+                    None => {
+                        log::error!(
+                            "handle core protocol {}, timeout({:?})",
+                            stream.protocol_id(),
+                            rpc_timeout
                         );
 
                         return;
@@ -522,6 +551,7 @@ pub struct SwitchBuilder {
     host_key: Option<BoxHostKey>,
     route_table: Option<BoxRouteTable>,
     conn_pool: Option<BoxConnPool>,
+    rpc_timeout: Duration,
 }
 
 impl SwitchBuilder {
@@ -530,8 +560,17 @@ impl SwitchBuilder {
         Self {
             agent_version: "/rasi/libp2p/0.0.1".to_string(),
             max_identity_packet_len: 4096,
+            rpc_timeout: Duration::from_secs(10),
             ..Default::default()
         }
+    }
+
+    /// Set the `rpc-timeout` value, the default value is `10s`.
+    ///
+    /// This configuration will be used in protocol requests.
+    pub fn set_rpc_timeout(mut self, value: Duration) -> Self {
+        self.rpc_timeout = value;
+        self
     }
 
     /// Set the agent_version value, the default is `/rasi/libp2p/x.x.x`.
@@ -636,6 +675,7 @@ impl SwitchBuilder {
                 transports: self.transports,
                 route_table,
                 conn_pool,
+                rpc_timeout: self.rpc_timeout,
             }),
 
             event_map: Default::default(),
@@ -649,10 +689,12 @@ impl SwitchBuilder {
 }
 
 mod core_protocols {
+    use crate::BufferOverflow;
+
     use super::*;
 
     /// Handle `/ipfs/ping/1.0.0` request.
-    pub(super) async fn ping_echo(stream: &mut P2pStream) -> Result<()> {
+    pub(super) async fn ping_echo(mut stream: &mut P2pStream) -> Result<()> {
         loop {
             let mut buf = vec![0; 32];
 
@@ -667,25 +709,23 @@ mod core_protocols {
         let identify = {
             let mut stream = conn.open(["/ipfs/id/1.0.0"]).await?;
 
-            let mut buf = ReadBuf::with_capacity(switch.max_identity_packet_len());
+            log::trace!("identity_request: read varint length");
 
-            log::trace!("identity_request: read content");
+            let body_len = unsigned_varint::aio::read_usize(&mut stream).await?;
 
-            loop {
-                let read_size = stream.read(buf.chunk_mut()).await?;
+            log::trace!("identity_request: read varint length");
 
-                log::trace!("identity_request recv: {}", read_size);
-
-                if read_size == 0 {
-                    break;
-                }
-
-                buf.advance_mut(read_size);
+            if switch.max_identity_packet_len() < body_len {
+                return Err(Error::BufferOverflow(BufferOverflow::Identity(body_len)));
             }
 
-            log::trace!("identity_request total size: {:?}", buf.remaining());
+            log::trace!("identity_request recv body: {}", body_len);
 
-            Identify::parse_from_bytes(&buf.chunk()[2..])?
+            let mut buf = vec![0; body_len];
+
+            stream.read_exact(&mut buf).await?;
+
+            Identify::parse_from_bytes(&buf)?
         };
 
         let conn_peer_id = conn.peer_id()?;
@@ -734,27 +774,38 @@ mod core_protocols {
 
         let buf = identity.write_to_bytes()?;
 
+        let mut payload_len = unsigned_varint::encode::usize_buffer();
+
+        stream
+            .write_all(unsigned_varint::encode::usize(buf.len(), &mut payload_len))
+            .await?;
+
         stream.write_all(&buf).await?;
 
         Ok(())
     }
 
     /// Handle `/ipfs/id/push/1.0.0` request.
-    pub(super) async fn identity_push(switch: &mut Switch, stream: &mut P2pStream) -> Result<()> {
+    pub(super) async fn identity_push(
+        switch: &mut Switch,
+        mut stream: &mut P2pStream,
+    ) -> Result<()> {
         let identify = {
-            let mut buf = ReadBuf::with_capacity(switch.max_identity_packet_len());
+            let body_len = unsigned_varint::aio::read_usize(&mut stream).await?;
 
-            loop {
-                let read_size = stream.read(buf.chunk_mut()).await?;
+            log::trace!("identity_request: read varint length");
 
-                if read_size == 0 {
-                    break;
-                }
-
-                buf.advance_mut(read_size);
+            if switch.max_identity_packet_len() < body_len {
+                return Err(Error::BufferOverflow(BufferOverflow::Identity(body_len)));
             }
 
-            Identify::parse_from_bytes(buf.chunk())?
+            log::trace!("identity_request recv body: {}", body_len);
+
+            let mut buf = vec![0; body_len];
+
+            stream.read_exact(&mut buf).await?;
+
+            Identify::parse_from_bytes(&mut buf)?
         };
 
         let peer_id = PublicKey::try_decode_protobuf(identify.publicKey())?.to_peer_id();

@@ -25,7 +25,7 @@ semver = { workspace = true }
 thiserror = { workspace = true }
 log = { workspace = true }
 multistream-select = { workspace = true }
-unsigned-varint= { workspace = true }
+unsigned-varint= { workspace = true,features = ["futures"] }
 #rasi
 rasi = { workspace = true }
 rasi-ext = { workspace = true, default-features = false, features = [

@@ -28,6 +28,19 @@ pub enum Error {
 
     #[error("A valid routing path to connect to the peer could not be found.")]
     RouteError,
+
+    /// A error wrapper for [`unsigned_varint::io::ReadError`]
+    #[error(transparent)]
+    UnsignedVarint(#[from] unsigned_varint::io::ReadError),
+
+    #[error("Receiving buffer overflow, {0}")]
+    BufferOverflow(BufferOverflow),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BufferOverflow {
+    #[error("Identify response buffer overflow, expect buffer length is {0}")]
+    Identity(usize),
 }
 
 impl From<Error> for io::Error {
