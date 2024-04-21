@@ -245,10 +245,10 @@ impl YamuxConn {
     {
         match Self::recv_loop_inner(&mut conn, &mut reader).await {
             Ok(_) => {
-                log::info!("Yamux conn stop recv loop");
+                log::info!("stop recv loop");
             }
             Err(err) => {
-                log::error!("Yamux conn stop recv loop, {}", err);
+                log::error!("stop recv loop with error: {}", err);
             }
         }
 
@@ -265,13 +265,11 @@ impl YamuxConn {
         let mut buf = vec![0; 1024 * 4 + 12];
 
         loop {
+            log::trace!("recv frame header, is_server={}", conn.is_server);
+
             reader.read_exact(&mut buf[0..12]).await?;
 
-            log::trace!(
-                "recv data from peer, is_server={}, len={}",
-                conn.is_server,
-                12
-            );
+            log::trace!("recv frame header, is_server={}, Ok", conn.is_server);
 
             match conn.recv(&buf[..12]).await {
                 Ok(_) => {
@@ -282,9 +280,11 @@ impl YamuxConn {
                         return Err(Error::Overflow.into());
                     }
 
+                    log::trace!("recv data frame body, len={}", len - 12);
+
                     reader.read_exact(&mut buf[12..len as usize]).await?;
 
-                    log::trace!("yamux conn recv loop, recv data, len={}", len);
+                    log::trace!("recv data frame body, len={}, Ok", len - 12);
 
                     conn.recv(&buf[..len as usize]).await?;
                 }
@@ -316,7 +316,7 @@ impl YamuxConn {
     {
         use rasi::io::AsyncWriteExt;
 
-        let mut buf = vec![0; 1024 * 4 + 12];
+        let mut buf = vec![0; 1024 + 12];
 
         loop {
             let send_size: usize = conn.send(&mut buf).await?;

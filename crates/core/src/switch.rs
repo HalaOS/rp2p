@@ -800,7 +800,10 @@ mod core_protocols {
 
         let buf = identity.write_to_bytes()?;
 
-        log::trace!("handle identity request: response {}", buf.len());
+        log::trace!(
+            "handle identity request, protos={:?}",
+            switch.immutable_switch.protos
+        );
 
         let mut payload_len = unsigned_varint::encode::usize_buffer();
 

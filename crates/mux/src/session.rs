@@ -414,6 +414,7 @@ impl Stream {
     }
 }
 
+#[derive(Debug)]
 enum SendFrame {
     #[allow(unused)]
     Ping(u32),
@@ -718,6 +719,7 @@ impl Session {
         }
 
         while let Some(send_frame) = self.send_frames.pop_front() {
+            log::trace!("send frame, type={:?}", send_frame);
             match send_frame {
                 SendFrame::Ping(opaque) => return self.send_ping(buf, opaque),
                 SendFrame::Pong(opaque) => return self.send_pong(buf, opaque),
