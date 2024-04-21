@@ -464,7 +464,7 @@ impl Switch {
 
     async fn conn_accept_loop(&self, p2p_conn: P2pConn) -> Result<()> {
         loop {
-            let mut stream = p2p_conn
+            let stream = p2p_conn
                 .accept(self.immutable_switch.protos.clone())
                 .await?;
 
@@ -479,19 +479,21 @@ impl Switch {
             let rpc_timeout = self.immutable_switch.rpc_timeout;
 
             spawn(async move {
-                match this
-                    .handle_core_protocols(&mut stream)
+                let protocol_id = stream.protocol_id().clone();
+
+                let stream = match this
+                    .handle_core_protocols(stream)
                     .timeout(rpc_timeout)
                     .await
                 {
-                    Some(Ok(true)) => {
+                    Some(Ok(Some(stream))) => stream,
+                    Some(Ok(None)) => {
                         return;
                     }
-                    Some(Ok(false)) => {}
                     Some(Err(err)) => {
                         log::error!(
                             "handle core protocol {}, returns error: {}",
-                            stream.protocol_id(),
+                            protocol_id,
                             err
                         );
 
@@ -500,13 +502,13 @@ impl Switch {
                     None => {
                         log::error!(
                             "handle core protocol {}, timeout({:?})",
-                            stream.protocol_id(),
+                            protocol_id,
                             rpc_timeout
                         );
 
                         return;
                     }
-                }
+                };
 
                 mutable_switch.lock().await.incoming.push_back(stream);
 
@@ -515,7 +517,7 @@ impl Switch {
         }
     }
 
-    async fn handle_core_protocols(&mut self, stream: &mut P2pStream) -> Result<bool> {
+    async fn handle_core_protocols(&mut self, stream: P2pStream) -> Result<Option<P2pStream>> {
         let protocol_id = stream.protocol_id();
 
         log::trace!("handle core protocols: {}", protocol_id.to_string());
@@ -523,22 +525,22 @@ impl Switch {
         if protocol_id.to_string() == "/ipfs/id/1.0.0" {
             core_protocols::identity_response(self, stream).await?;
 
-            return Ok(true);
+            return Ok(None);
         }
 
         if protocol_id.to_string() == "/ipfs/id/push/1.0.0" {
             core_protocols::identity_push(self, stream).await?;
 
-            return Ok(true);
+            return Ok(None);
         }
 
         if protocol_id.to_string() == "/ipfs/ping/1.0.0" {
             core_protocols::ping_echo(stream).await?;
 
-            return Ok(true);
+            return Ok(None);
         }
 
-        return Ok(false);
+        return Ok(Some(stream));
     }
 }
 
@@ -696,8 +698,10 @@ mod core_protocols {
     use super::*;
 
     /// Handle `/ipfs/ping/1.0.0` request.
-    pub(super) async fn ping_echo(mut stream: &mut P2pStream) -> Result<()> {
+    pub(super) async fn ping_echo(mut stream: P2pStream) -> Result<()> {
         loop {
+            log::trace!("recv /ipfs/ping/1.0.0");
+
             let body_len = unsigned_varint::aio::read_usize(&mut stream).await?;
 
             log::trace!("recv /ipfs/ping/1.0.0 payload len {}", body_len);
@@ -706,7 +710,7 @@ mod core_protocols {
                 return Err(Error::ProtocolPing);
             }
 
-            let mut buf = vec![0; 32];
+            let mut buf = vec![0; 31];
 
             stream.read_exact(&mut buf).await?;
 
@@ -718,7 +722,7 @@ mod core_protocols {
 
             stream.write_all(&buf).await?;
 
-            log::trace!("send /ipfs/ping/1.0.0 echo ");
+            log::trace!("send /ipfs/ping/1.0.0 echo");
         }
     }
 
@@ -776,7 +780,7 @@ mod core_protocols {
     }
 
     /// The responsor of identify request.
-    pub(super) async fn identity_response(switch: &Switch, stream: &mut P2pStream) -> Result<()> {
+    pub(super) async fn identity_response(switch: &Switch, mut stream: P2pStream) -> Result<()> {
         let mut identity = Identify::new();
 
         identity.set_observedAddr(stream.peer_addr()?.to_vec());
@@ -804,10 +808,7 @@ mod core_protocols {
     }
 
     /// Handle `/ipfs/id/push/1.0.0` request.
-    pub(super) async fn identity_push(
-        switch: &mut Switch,
-        mut stream: &mut P2pStream,
-    ) -> Result<()> {
+    pub(super) async fn identity_push(switch: &mut Switch, mut stream: P2pStream) -> Result<()> {
         let identify = {
             let body_len = unsigned_varint::aio::read_usize(&mut stream).await?;
 
