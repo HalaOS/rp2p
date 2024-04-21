@@ -781,6 +781,8 @@ mod core_protocols {
 
     /// The responsor of identify request.
     pub(super) async fn identity_response(switch: &Switch, mut stream: P2pStream) -> Result<()> {
+        log::trace!("handle identity request");
+
         let mut identity = Identify::new();
 
         identity.set_observedAddr(stream.peer_addr()?.to_vec());
@@ -794,7 +796,11 @@ mod core_protocols {
             .map(|addr| addr.to_vec())
             .collect::<Vec<_>>();
 
+        identity.protocols = switch.immutable_switch.protos.clone();
+
         let buf = identity.write_to_bytes()?;
+
+        log::trace!("handle identity request: response {}", buf.len());
 
         let mut payload_len = unsigned_varint::encode::usize_buffer();
 

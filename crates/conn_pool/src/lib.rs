@@ -23,7 +23,7 @@ pub struct ConnPoolWithPing {
 impl Default for ConnPoolWithPing {
     fn default() -> Self {
         Self {
-            ping_duration: Duration::from_secs(24),
+            ping_duration: Duration::from_secs(5),
             peers: Default::default(),
         }
     }
@@ -101,7 +101,7 @@ async fn ping_loop_inner(conn: &mut P2pConn, ping_interval: Duration) -> io::Res
                 .await
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
-            log::trace!("recv /ipfs/ping/1.0.0 payload len {}", body_len);
+            log::trace!("recv /ipfs/ping/1.0.0 echo payload len {}", body_len);
 
             if body_len != 32 {
                 return Err(io::Error::new(
