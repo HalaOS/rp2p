@@ -1,0 +1,31 @@
+[package]
+description = "quic transport for rp2p framework"
+documentation = "https://docs.rs/rp2p-quic"
+edition.workspace = true
+license = "MIT"
+name = "rp2p-quic"
+repository.workspace = true
+version.workspace = true
+readme = "../../README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+rp2p-core = { workspace = true }
+rp2p-x509 = { workspace = true }
+async-trait = { workspace = true }
+
+
+#rasi
+rasi = { workspace = true }
+rasi-ext = { workspace = true, default-features = false, features = ["tls","quic"] }
+#utils
+log = { workspace = true }
+#libp2p
+multistream-select = { workspace = true }
+
+
+[dev-dependencies]
+rasi-default = { workspace = true }
+futures-test = { workspace = true }
+pretty_env_logger = { workspace = true }
