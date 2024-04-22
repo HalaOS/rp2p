@@ -1,9 +1,12 @@
 use std::{
     cmp::min,
     collections::{HashMap, VecDeque},
+    num::NonZeroUsize,
 };
 
-use crate::{ring_buf::RingBuf, Error, Flags, Frame, FrameHeaderBuilder, FrameType, Result};
+use rasi_ext::utils::RingBuf;
+
+use crate::{Error, Flags, Frame, FrameHeaderBuilder, FrameType, Result};
 
 /// When Yamux is initially starts each stream with a 256KB window size.
 pub const INIT_WINDOW_SIZE: u32 = 256 * 1024;
@@ -22,7 +25,7 @@ impl RecvBuf {
         Self {
             // cause panic, if window_size < `INIT_WINDOW_SIZE`.
             delta_window_size: window_size - INIT_WINDOW_SIZE,
-            ring_buf: RingBuf::with_capacity(window_size as usize),
+            ring_buf: RingBuf::with_capacity(NonZeroUsize::new(window_size as usize).unwrap()),
         }
     }
     /// Write contiguous data into the receive buffer received from peer.
@@ -115,7 +118,7 @@ impl SendBuf {
         Self {
             // As the spec description, the initial window size must be 256KB.
             window_size: INIT_WINDOW_SIZE,
-            ring_buf: RingBuf::with_capacity(length),
+            ring_buf: RingBuf::with_capacity(NonZeroUsize::new(length).unwrap()),
         }
     }
 
