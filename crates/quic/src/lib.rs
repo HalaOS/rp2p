@@ -252,7 +252,7 @@ async fn create_quic_config(host_key: &dyn HostKey) -> io::Result<Config> {
         SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
         |ssl| {
             let cert = ssl
-                .certificate()
+                .peer_certificate()
                 .ok_or(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REQUIRED))?;
 
             let cert = cert
@@ -274,6 +274,10 @@ async fn create_quic_config(host_key: &dyn HostKey) -> io::Result<Config> {
     config.verify_peer(true);
 
     config.set_application_protos(&[b"libp2p"]).unwrap();
+
+    config.enable_early_data();
+
+    config.set_disable_active_migration(false);
 
     Ok(config)
 }

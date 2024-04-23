@@ -1050,10 +1050,10 @@ mod tests {
         stream.recv_data_frame(&frame).unwrap();
 
         assert!(stream.flags.contains(Flags::ACK));
-        assert!(stream.flags.contains(Flags::RST));
+        assert!(stream.flags.contains(Flags::RRST));
         assert!(stream.flags.contains(Flags::FIN));
 
-        assert_eq!(stream.send(&buf, false).unwrap_err(), Error::StreamReset(1));
+        assert_eq!(stream.send(&buf, false).unwrap_err(), Error::FinalSize(1));
     }
 
     #[test]

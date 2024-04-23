@@ -10,6 +10,7 @@ use rasi_default::{
 use rp2p::{multiaddr::Multiaddr, SwitchBuilder};
 use rp2p_conn_pool::ConnPoolWithPing;
 use rp2p_hostkey::memory::MemoryHostKey;
+use rp2p_quic::QuicTransport;
 use rp2p_route_table::memory::MemoryRouteTable;
 use rp2p_tcp::TcpTransport;
 
@@ -33,7 +34,7 @@ type Multiaddrs = Vec<Multiaddr>;
 )]
 struct Sniffier {
     /// The boostrap route table.
-    #[arg(short, long, value_parser = clap_parse_multiaddr, default_value="/ip4/0.0.0.0/tcp/4001")]
+    #[arg(short, long, value_parser = clap_parse_multiaddr, default_value="/ip4/127.0.0.1/udp/4001/quic-v1")]
     bootstrap: Multiaddrs,
 
     /// Use verbose output
@@ -72,6 +73,7 @@ async fn sniffier() -> io::Result<()> {
         .route_table(MemoryRouteTable::default())
         .conn_pool(ConnPoolWithPing::default())
         .transport(TcpTransport::default())
+        .transport(QuicTransport::default())
         .create()
         .await?;
 

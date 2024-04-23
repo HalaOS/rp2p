@@ -91,7 +91,7 @@ impl Transport for TcpTransport {
             SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT,
             |ssl| {
                 let cert = ssl
-                    .certificate()
+                    .peer_certificate()
                     .ok_or(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REQUIRED))?;
 
                 let cert = cert
@@ -143,7 +143,7 @@ impl Transport for TcpTransport {
 
         config.set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
             let cert = ssl
-                .certificate()
+                .peer_certificate()
                 .ok_or(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REQUIRED))?;
 
             let cert = cert

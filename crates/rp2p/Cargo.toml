@@ -13,6 +13,7 @@ readme = "../../README.md"
 rp2p-core = { workspace = true }
 rp2p-x509 = { workspace = true }
 rp2p-tcp = { workspace = true }
+rp2p-quic = { workspace = true }
 rp2p-conn-pool = { workspace = true }
 rp2p-route-table = { workspace = true }
 rp2p-hostkey = { workspace = true }
