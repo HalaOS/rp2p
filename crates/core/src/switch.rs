@@ -772,7 +772,13 @@ mod core_protocols {
             .map(|buf| Multiaddr::try_from(buf).map_err(Into::into))
             .collect::<Result<Vec<_>>>()?;
 
-        log::trace!("listen addrs: {:#?}", identify.protocols);
+        let observed_addrs = identify
+            .observedAddr
+            .into_iter()
+            .map(|buf| Multiaddr::try_from(buf).map_err(Into::into))
+            .collect::<Result<Vec<_>>>()?;
+
+        log::trace!("observed addrs: {:#?}", observed_addrs);
 
         switch.route_table_put(peer_id, &raddrs).await?;
 
