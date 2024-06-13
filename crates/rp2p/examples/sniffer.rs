@@ -45,7 +45,7 @@ struct Sniffier {
 fn main() {
     register_mio_network();
     register_mio_timer();
-    register_futures_executor().unwrap();
+    register_futures_executor();
 
     if let Err(err) = block_on(sniffier()) {
         log::error!("Sniffier exit with error: {:#?}", err);

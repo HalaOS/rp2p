@@ -363,7 +363,7 @@ mod tests {
     async fn test_tls() {
         register_mio_network();
         register_mio_timer();
-        register_futures_executor().unwrap();
+        register_futures_executor();
 
         let transport = TcpTransport::default();
 

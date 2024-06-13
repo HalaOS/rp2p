@@ -435,7 +435,7 @@ mod tests {
         INIT.call_once(|| {
             register_mio_network();
             register_mio_timer();
-            register_futures_executor().unwrap();
+            register_futures_executor();
 
             // pretty_env_logger::init_timed();
         });
