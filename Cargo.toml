@@ -18,22 +18,23 @@ log = { version = "^0.4" }
 pretty_env_logger = "^0.5"
 async-trait = "0.1.79"
 clap = "^4.5"
+quickcheck = "1.0.3"
 # rasi deps
 futures = { version = "^0.3" }
 bitmask-enum = "^2.2"
 boring = { version = "^4.4.0" }
-quiche = { version = "^0.21", features = ["boringssl-boring-crate"] }
+quiche = { version = "^0.22", features = ["boringssl-boring-crate"] }
 bytes = "^1.5"
 rand = { version = "^0.8", features = ["getrandom"] }
 cooked-waker = "^5"
 parking_lot = "^0.12"
 ring = "^0.17"
-dashmap = "5.5.3"
+dashmap = "^6.0"
 divan = "^0.1"
 futures-test = "0.3.30"
 num_cpus = "^1.16"
 boxcar = "^0.2.4"
-mio = { version = "^0.8.9", features = ["os-poll", "net"] }
+mio = { version = "^1.0.0", features = ["os-poll", "net"] }
 thiserror = "1.0.57"
 windows-sys = "^0.52"
 http = "^1.0"
@@ -41,6 +42,7 @@ httparse = "^1.8"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = { version = "^1.0" }
 unsigned-varint = "^0.8.0"
+uint = "^0.9"
 # libp2p
 multiaddr = "^0.18"
 identity = { version = "^0.2", package = "libp2p-identity" }
