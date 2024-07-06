@@ -1,4 +1,8 @@
+use std::net::SocketAddr;
+
 use uint::construct_uint;
+
+use crate::kbucket::KBucketKey;
 
 construct_uint! {
     pub(crate) struct U256(4);
@@ -32,6 +36,10 @@ impl From<identity::PeerId> for Key {
     }
 }
 
+impl KBucketKey for Key {
+    type Length = generic_array::typenum::U256;
+}
+
 impl Key {
     /// Calculate the distance between two [`Key`]s.
     pub fn distance<U>(&self, rhs: U) -> Distance
@@ -54,6 +62,14 @@ impl Key {
 
         Self(key_int.into())
     }
+
+    /// Returns the longest common prefix length with `rhs`.
+    pub fn longest_common_prefix<U>(&self, rhs: U) -> usize
+    where
+        U: Into<Key>,
+    {
+        self.distance(rhs).0.leading_zeros() as usize
+    }
 }
 
 /// The distance between two kad Keys.
@@ -69,6 +85,8 @@ impl Distance {
     }
 }
 
+pub type KBucketTable = crate::kbucket::KBucketTable<Key, SocketAddr>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,10 +101,26 @@ mod tests {
     }
 
     #[test]
-    fn symmetry() {
+    fn distance_symmetry() {
         fn prop(a: Key, b: Key) -> bool {
             a.distance(b) == b.distance(a)
         }
         quickcheck(prop as fn(_, _) -> _)
+    }
+
+    #[test]
+    fn for_distance() {
+        fn prop(a: Key, b: Key) -> bool {
+            a.for_distance(a.distance(b)) == b
+        }
+        quickcheck(prop as fn(_, _) -> _)
+    }
+
+    #[test]
+    fn k_distance_0() {
+        assert_eq!(Distance(U256::from(0)).k_index(), None);
+        assert_eq!(Distance(U256::from(1)).k_index(), Some(0));
+        assert_eq!(Distance(U256::from(2)).k_index(), Some(1));
+        assert_eq!(Distance(U256::from(3)).k_index(), Some(1));
     }
 }

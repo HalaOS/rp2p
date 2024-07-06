@@ -1,3 +1,4 @@
-pub mod bucket;
-mod primitives;
-pub use primitives::*;
+pub mod kbucket;
+
+mod kad;
+pub use kad::*;
