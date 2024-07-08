@@ -1,4 +1,4 @@
-use std::{borrow::Borrow, net::SocketAddr};
+use std::net::SocketAddr;
 
 use uint::construct_uint;
 

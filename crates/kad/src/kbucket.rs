@@ -145,12 +145,12 @@ where
         }
     }
 
-    /// Returns an iterator over the keys closest to `target`.
-    pub fn closest_k(&self, target: &Key) -> KBucketsTableIterator<'_, Key, Value> {
+    /// Returns an iterator of up to `k` keys closest to `target`.
+    pub fn closest_k(&self, _target: &Key) -> KBucketsTableIterator<'_, Key, Value> {
         todo!()
     }
 }
 
 pub struct KBucketsTableIterator<'a, Key, Value> {
-    buckets: &'a [KBucket<Key, Value>],
+    _buckets: &'a [KBucket<Key, Value>],
 }
