@@ -1,8 +1,8 @@
-use std::net::SocketAddr;
+use std::{borrow::Borrow, net::SocketAddr};
 
 use uint::construct_uint;
 
-use crate::kbucket::KBucketKey;
+use crate::kbucket::{KBucketDistance, KBucketKey};
 
 construct_uint! {
     pub(crate) struct U256(4);
@@ -38,16 +38,12 @@ impl From<identity::PeerId> for Key {
 
 impl KBucketKey for Key {
     type Length = generic_array::typenum::U256;
-}
+    type Distance = Distance;
 
-impl Key {
     /// Calculate the distance between two [`Key`]s.
-    pub fn distance<U>(&self, rhs: U) -> Distance
-    where
-        U: Into<Key>,
-    {
+    fn distance(&self, rhs: &Self) -> Distance {
         let lhs = U256::from(self.0.as_slice());
-        let rhs = U256::from(rhs.into().0.as_slice());
+        let rhs = U256::from((*rhs).0.as_slice());
 
         Distance(lhs ^ rhs)
     }
@@ -57,17 +53,14 @@ impl Key {
     /// This implements the following equivalence:
     ///
     /// `self xor other = distance <==> other = self xor distance`
-    pub fn for_distance(&self, distance: Distance) -> Self {
+    fn for_distance(&self, distance: Distance) -> Self {
         let key_int = U256::from(self.0.as_slice()) ^ distance.0;
 
         Self(key_int.into())
     }
 
     /// Returns the longest common prefix length with `rhs`.
-    pub fn longest_common_prefix<U>(&self, rhs: U) -> usize
-    where
-        U: Into<Key>,
-    {
+    fn longest_common_prefix(&self, rhs: &Self) -> usize {
         self.distance(rhs).0.leading_zeros() as usize
     }
 }
@@ -76,16 +69,16 @@ impl Key {
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Distance(pub(crate) U256);
 
-impl Distance {
+impl KBucketDistance for Distance {
     /// Returns the integer part of the base 2 logarithm of the [`Distance`].
     ///
     /// Returns `None` if the distance is zero.
-    pub fn k_index(&self) -> Option<u32> {
+    fn k_index(&self) -> Option<u32> {
         (256 - self.0.leading_zeros()).checked_sub(1)
     }
 }
 
-pub type KBucketTable = crate::kbucket::KBucketTable<Key, SocketAddr>;
+pub type KBucketTable = crate::kbucket::KBucketsTable<Key, SocketAddr>;
 
 #[cfg(test)]
 mod tests {
@@ -103,7 +96,7 @@ mod tests {
     #[test]
     fn distance_symmetry() {
         fn prop(a: Key, b: Key) -> bool {
-            a.distance(b) == b.distance(a)
+            a.distance(&b) == b.distance(&a)
         }
         quickcheck(prop as fn(_, _) -> _)
     }
@@ -111,7 +104,7 @@ mod tests {
     #[test]
     fn for_distance() {
         fn prop(a: Key, b: Key) -> bool {
-            a.for_distance(a.distance(b)) == b
+            a.for_distance(a.distance(&b)) == b
         }
         quickcheck(prop as fn(_, _) -> _)
     }
