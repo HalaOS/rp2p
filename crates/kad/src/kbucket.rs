@@ -32,27 +32,25 @@ pub trait KBucketDistance {
     fn k_index(&self) -> Option<u32>;
 }
 
-#[derive(Debug)]
-struct KBucket<Key, Value> {
-    nodes: VecDeque<(Key, Value)>,
-}
+struct KBucket<Key, Value>(VecDeque<(Key, Value)>);
 
 impl<Key, Value> Default for KBucket<Key, Value> {
     fn default() -> Self {
-        Self {
-            nodes: VecDeque::default(),
-        }
+        Self(VecDeque::default())
     }
 }
 
 impl<Key, Value> KBucket<Key, Value> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
     fn remove(&mut self, remove_key: &Key) -> Option<(Key, Value)>
     where
         Key: PartialEq,
     {
         let mut remove_index = None;
 
-        for (index, (key, _)) in self.nodes.iter().enumerate() {
+        for (index, (key, _)) in self.0.iter().enumerate() {
             if *key == *remove_key {
                 remove_index = Some(index);
                 break;
@@ -60,26 +58,21 @@ impl<Key, Value> KBucket<Key, Value> {
         }
 
         if let Some(remove_index) = remove_index {
-            self.nodes.remove(remove_index)
+            self.0.remove(remove_index)
         } else {
             None
         }
     }
 }
 
-/// Kad route table implementation using k-bucket data structure.
 pub struct KBucketsTable<Key, Value>
 where
     Key: KBucketKey,
 {
-    /// local node key.
     local_key: Key,
-    /// The maximum constant value for the number of bucket nodes.
     const_k: usize,
-    /// The pool of bucket objects that have been created.
     buckets: Vec<KBucket<Key, Value>>,
-    /// Bucket index in bucket pool.
-    indexes: GenericArray<Option<usize>, Key::Length>,
+    k_index: GenericArray<Option<usize>, Key::Length>,
 }
 
 impl<Key, Value> KBucketsTable<Key, Value>
@@ -92,7 +85,7 @@ where
             local_key,
             const_k,
             buckets: Default::default(),
-            indexes: Default::default(),
+            k_index: Default::default(),
         }
     }
 
@@ -108,49 +101,162 @@ where
 
         if let Some(k_index) = k_index {
             let k_index = k_index as usize;
-            assert!(k_index < self.indexes.len());
+            assert!(k_index < self.k_index.len());
 
-            let k_bucket = if let Some(index) = self.indexes[k_index] {
+            let k_bucket = if let Some(index) = self.k_index[k_index] {
                 self.buckets.get_mut(index).unwrap()
             } else {
                 self.buckets.push(KBucket::default());
-                self.indexes[k_index] = Some(self.buckets.len() - 1);
+                self.k_index[k_index] = Some(self.buckets.len() - 1);
                 self.buckets.last_mut().unwrap()
             };
 
             if let Some(pair) = k_bucket.remove(key) {
                 if let Some(value) = callback(Some(&pair)) {
-                    k_bucket.nodes.pop_front();
-                    k_bucket.nodes.push_back((key.clone(), value));
+                    k_bucket.0.pop_front();
+                    k_bucket.0.push_back((key.clone(), value));
                 } else {
-                    k_bucket.nodes.push_back(pair);
+                    k_bucket.0.push_back(pair);
                 }
 
                 return;
             }
 
-            if k_bucket.nodes.len() == self.const_k {
-                if let Some(value) = callback(k_bucket.nodes.front()) {
-                    k_bucket.nodes.pop_front();
-                    k_bucket.nodes.push_back((key.clone(), value));
+            if k_bucket.0.len() == self.const_k {
+                if let Some(value) = callback(k_bucket.0.front()) {
+                    k_bucket.0.pop_front();
+                    k_bucket.0.push_back((key.clone(), value));
                 } else {
-                    let pair = k_bucket.nodes.pop_front().unwrap();
-                    k_bucket.nodes.push_back(pair);
+                    let pair = k_bucket.0.pop_front().unwrap();
+                    k_bucket.0.push_back(pair);
                 }
             } else {
                 let value = callback(None).expect("Expect key value");
 
-                k_bucket.nodes.push_back((key.clone(), value));
+                k_bucket.0.push_back((key.clone(), value));
             }
         }
     }
 
     /// Returns an iterator of up to `k` keys closest to `target`.
-    pub fn closest_k(&self, _target: &Key) -> KBucketsTableIterator<'_, Key, Value> {
-        todo!()
+    pub fn closest_k(&self, target: &Key) -> KBucketsTableIter<'_, Key, Value> {
+        let k_index = target
+            .distance(&self.local_key)
+            .k_index()
+            .expect("Call closest_k with local key.") as usize;
+
+        let bucket_len = if let Some(bucket) = self.bucket(k_index) {
+            if bucket.len() == self.const_k {
+                return KBucketsTableIter {
+                    table: self,
+                    k_offset: k_index,
+                    k_end_offset: k_index,
+                    k_inner_offset: 0,
+                    k_end_inner_offset: self.const_k,
+                };
+            }
+
+            bucket.len()
+        } else {
+            0
+        };
+
+        let mut k_offset = k_index;
+        let mut k_end_offset = k_index;
+
+        let mut k_inner_offset = 0;
+        let mut k_end_inner_offset: usize = bucket_len;
+
+        let mut nodes = bucket_len;
+
+        while nodes < self.const_k {
+            if k_offset > 0 {
+                k_offset -= 1;
+                if let Some(bucket) = self.bucket(k_offset) {
+                    nodes += bucket.len();
+
+                    if nodes >= self.const_k {
+                        k_inner_offset = nodes - self.const_k;
+                        // nodes = self.const_k;
+                        break;
+                    } else {
+                        k_inner_offset = 0;
+                    }
+                }
+            }
+
+            if k_end_offset < self.k_index.len() {
+                k_end_offset += 1;
+
+                if let Some(bucket) = self.bucket(k_offset) {
+                    nodes += bucket.len();
+                    k_end_inner_offset = bucket.len();
+
+                    if nodes >= self.const_k {
+                        k_end_inner_offset -= nodes - self.const_k;
+                        // nodes = self.const_k;
+                        break;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        return KBucketsTableIter {
+            table: self,
+            k_offset,
+            k_end_offset,
+            k_inner_offset,
+            k_end_inner_offset,
+        };
+    }
+
+    fn bucket(&self, index: usize) -> Option<&KBucket<Key, Value>> {
+        self.k_index[index].map(|index| &self.buckets[index])
     }
 }
 
-pub struct KBucketsTableIterator<'a, Key, Value> {
-    _buckets: &'a [KBucket<Key, Value>],
+/// An immutable iterator over [`KBucketsTable`]
+pub struct KBucketsTableIter<'a, Key, Value>
+where
+    Key: KBucketKey,
+{
+    table: &'a KBucketsTable<Key, Value>,
+    k_offset: usize,
+    k_inner_offset: usize,
+    k_end_offset: usize,
+    k_end_inner_offset: usize,
 }
+
+impl<'a, Key, Value> Iterator for KBucketsTableIter<'a, Key, Value>
+where
+    Key: KBucketKey,
+{
+    type Item = &'a (Key, Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.k_offset == self.k_end_offset && self.k_inner_offset == self.k_end_inner_offset {
+            return None;
+        }
+
+        let k_bucket_offset = self.table.k_index[self.k_offset].expect("k-bucket not exists");
+
+        let k_bucket = &self.table.buckets[k_bucket_offset];
+
+        //  In the bucket, iterate in MRU order
+        let item = &k_bucket.0[k_bucket.0.len() - self.k_inner_offset - 1];
+
+        self.k_inner_offset += 1;
+
+        if self.k_inner_offset == k_bucket.0.len() {
+            self.k_inner_offset = 0;
+            self.k_offset += 1;
+        }
+
+        Some(item)
+    }
+}
+
+#[cfg(test)]
+mod tests {}

@@ -78,8 +78,6 @@ impl KBucketDistance for Distance {
     }
 }
 
-pub type KBucketTable = crate::kbucket::KBucketsTable<Key, SocketAddr>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
