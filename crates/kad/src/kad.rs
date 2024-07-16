@@ -78,6 +78,9 @@ impl KBucketDistance for Distance {
     }
 }
 
+/// Kad default `KBucketTable` type.
+pub type KBucketTable = crate::kbucket::KBucketTable<Key, SocketAddr>;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +116,39 @@ mod tests {
         assert_eq!(Distance(U256::from(1)).k_index(), Some(0));
         assert_eq!(Distance(U256::from(2)).k_index(), Some(1));
         assert_eq!(Distance(U256::from(3)).k_index(), Some(1));
+    }
+
+    #[test]
+    fn k_bucket_update() {
+        let local_key = Key::from(PeerId::random());
+        let mut k_bucket_table = KBucketTable::new(local_key, 20);
+
+        assert_eq!(k_bucket_table.len(), 0);
+
+        let a = Key::from(PeerId::random());
+
+        k_bucket_table.update(&a, |value| {
+            assert!(value.is_none());
+
+            Some("127.0.0.1:1921".parse().unwrap())
+        });
+
+        assert_eq!(k_bucket_table.len(), 1);
+
+        let value = k_bucket_table.get(&a);
+
+        assert_eq!(value, Some(&"127.0.0.1:1921".parse().unwrap()));
+
+        k_bucket_table.update(&a, |value| {
+            assert_eq!(value, Some(&"127.0.0.1:1921".parse().unwrap()));
+
+            Some("127.0.0.1:1922".parse().unwrap())
+        });
+
+        assert_eq!(k_bucket_table.len(), 1);
+
+        let value = k_bucket_table.get(&a);
+
+        assert_eq!(value, Some(&"127.0.0.1:1922".parse().unwrap()));
     }
 }

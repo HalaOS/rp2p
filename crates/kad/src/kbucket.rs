@@ -63,19 +63,33 @@ impl<Key, Value> KBucket<Key, Value> {
             None
         }
     }
+
+    fn get(&self, key: &Key) -> Option<&Value>
+    where
+        Key: PartialEq,
+    {
+        for (k, value) in self.0.iter() {
+            if *key == *k {
+                return Some(value);
+            }
+        }
+
+        None
+    }
 }
 
-pub struct KBucketsTable<Key, Value>
+pub struct KBucketTable<Key, Value>
 where
     Key: KBucketKey,
 {
     local_key: Key,
     const_k: usize,
+    count: usize,
     buckets: Vec<KBucket<Key, Value>>,
     k_index: GenericArray<Option<usize>, Key::Length>,
 }
 
-impl<Key, Value> KBucketsTable<Key, Value>
+impl<Key, Value> KBucketTable<Key, Value>
 where
     Key: KBucketKey,
 {
@@ -84,8 +98,33 @@ where
         Self {
             local_key,
             const_k,
+            count: 0,
             buckets: Default::default(),
             k_index: Default::default(),
+        }
+    }
+
+    /// Returns the local node key.
+    pub fn local_key(&self) -> &Key {
+        &self.local_key
+    }
+
+    /// Get the count of stored keys.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    /// Returns value of given key.
+    pub fn get(&self, key: &Key) -> Option<&Value>
+    where
+        Key: PartialEq,
+    {
+        let k_index = self.k_index_of(key);
+
+        if let Some(bucket) = self.bucket(k_index) {
+            bucket.get(key)
+        } else {
+            None
         }
     }
 
@@ -94,60 +133,54 @@ where
     /// This function has no side effects if called with `local_key`.
     pub fn update<F>(&mut self, key: &Key, callback: F)
     where
-        F: FnOnce(Option<&(Key, Value)>) -> Option<Value>,
+        F: FnOnce(Option<&Value>) -> Option<Value>,
         Key: Clone + PartialEq,
     {
-        let k_index = key.distance(&self.local_key).k_index();
+        let k_index = self.k_index_of(key);
 
-        if let Some(k_index) = k_index {
-            let k_index = k_index as usize;
-            assert!(k_index < self.k_index.len());
+        let k_bucket = if let Some(index) = self.k_index[k_index] {
+            self.buckets.get_mut(index).unwrap()
+        } else {
+            self.buckets.push(KBucket::default());
+            self.k_index[k_index] = Some(self.buckets.len() - 1);
+            self.buckets.last_mut().unwrap()
+        };
 
-            let k_bucket = if let Some(index) = self.k_index[k_index] {
-                self.buckets.get_mut(index).unwrap()
-            } else {
-                self.buckets.push(KBucket::default());
-                self.k_index[k_index] = Some(self.buckets.len() - 1);
-                self.buckets.last_mut().unwrap()
-            };
-
-            if let Some(pair) = k_bucket.remove(key) {
-                if let Some(value) = callback(Some(&pair)) {
-                    k_bucket.0.pop_front();
-                    k_bucket.0.push_back((key.clone(), value));
-                } else {
-                    k_bucket.0.push_back(pair);
-                }
-
-                return;
-            }
-
-            if k_bucket.0.len() == self.const_k {
-                if let Some(value) = callback(k_bucket.0.front()) {
-                    k_bucket.0.pop_front();
-                    k_bucket.0.push_back((key.clone(), value));
-                } else {
-                    let pair = k_bucket.0.pop_front().unwrap();
-                    k_bucket.0.push_back(pair);
-                }
-            } else {
-                let value = callback(None).expect("Expect key value");
-
+        if let Some((key, value)) = k_bucket.remove(key) {
+            if let Some(value) = callback(Some(&value)) {
+                k_bucket.0.pop_front();
                 k_bucket.0.push_back((key.clone(), value));
+            } else {
+                k_bucket.0.push_back((key, value));
             }
+
+            return;
+        }
+
+        if k_bucket.0.len() == self.const_k {
+            if let Some(value) = callback(k_bucket.0.front().map(|pair| &pair.1)) {
+                k_bucket.0.pop_front();
+                k_bucket.0.push_back((key.clone(), value));
+            } else {
+                let pair = k_bucket.0.pop_front().unwrap();
+                k_bucket.0.push_back(pair);
+            }
+        } else {
+            let value = callback(None).expect("Expect key value");
+
+            k_bucket.0.push_back((key.clone(), value));
+
+            self.count += 1;
         }
     }
 
     /// Returns an iterator of up to `k` keys closest to `target`.
-    pub fn closest_k(&self, target: &Key) -> KBucketsTableIter<'_, Key, Value> {
-        let k_index = target
-            .distance(&self.local_key)
-            .k_index()
-            .expect("Call closest_k with local key.") as usize;
+    pub fn closest_k(&self, target: &Key) -> KBucketTableIter<'_, Key, Value> {
+        let k_index = self.k_index_of(target);
 
         let bucket_len = if let Some(bucket) = self.bucket(k_index) {
             if bucket.len() == self.const_k {
-                return KBucketsTableIter {
+                return KBucketTableIter {
                     table: self,
                     k_offset: k_index,
                     k_end_offset: k_index,
@@ -203,7 +236,7 @@ where
             }
         }
 
-        return KBucketsTableIter {
+        return KBucketTableIter {
             table: self,
             k_offset,
             k_end_offset,
@@ -212,24 +245,51 @@ where
         };
     }
 
+    /// Returns an iterator over all inserted keys.
+    pub fn iter(&self) -> KBucketTableIter<'_, Key, Value> {
+        let k_end_inner_offset = self
+            .bucket(self.k_index.len())
+            .map(|bucket| bucket.len())
+            .unwrap_or(0);
+
+        return KBucketTableIter {
+            table: self,
+            k_offset: 0,
+            k_end_offset: self.k_index.len(),
+            k_inner_offset: 0,
+            k_end_inner_offset,
+        };
+    }
+
+    fn k_index_of(&self, key: &Key) -> usize {
+        let k_index = key
+            .distance(&self.local_key)
+            .k_index()
+            .expect("Get local key index") as usize;
+
+        assert!(k_index < self.k_index.len());
+
+        k_index
+    }
+
     fn bucket(&self, index: usize) -> Option<&KBucket<Key, Value>> {
         self.k_index[index].map(|index| &self.buckets[index])
     }
 }
 
 /// An immutable iterator over [`KBucketsTable`]
-pub struct KBucketsTableIter<'a, Key, Value>
+pub struct KBucketTableIter<'a, Key, Value>
 where
     Key: KBucketKey,
 {
-    table: &'a KBucketsTable<Key, Value>,
+    table: &'a KBucketTable<Key, Value>,
     k_offset: usize,
     k_inner_offset: usize,
     k_end_offset: usize,
     k_end_inner_offset: usize,
 }
 
-impl<'a, Key, Value> Iterator for KBucketsTableIter<'a, Key, Value>
+impl<'a, Key, Value> Iterator for KBucketTableIter<'a, Key, Value>
 where
     Key: KBucketKey,
 {
@@ -257,6 +317,3 @@ where
         Some(item)
     }
 }
-
-#[cfg(test)]
-mod tests {}
